@@ -44,7 +44,16 @@ jobs:
       - name: 安装前端依赖
         run: pnpm install --frozen-lockfile
 
-      - name: 打包（NSIS x64 安装包）
+      - name: 安装 Python（sidecar 冻结用）
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 冻结 Python sidecar（PyInstaller → externalBin）
+        shell: pwsh
+        run: pwsh scripts/build_sidecar_windows.ps1
+
+      - name: 打包（NSIS x64 安装包，含内置 sidecar）
         run: pnpm tauri build
 
       - name: 收集产物

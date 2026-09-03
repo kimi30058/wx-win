@@ -74,25 +74,33 @@ impl SidecarHandle {
         Self::do_spawn(cmd).await
     }
 
-    /// 按 env `WXAUTO_SIDECAR_CMD` 启动 sidecar；未设置时用默认命令
-    /// `python3 sidecar-python/sidecar.py` 并把 cwd 锚到仓库根（exe 从
-    /// src-tauri/target 跑时 cwd 相对路径找不到 sidecar.py——Task 7 修正）。
-    /// 显式设置原样拆分（程序 + 空格分隔参数），cwd 不改。
+    /// sidecar 启动解析优先级（安装态开箱即用 → 开发态回退）：
+    /// 1. env `WXAUTO_SIDECAR_CMD` 显式覆盖（引号语义解析，支持含空格路径）
+    /// 2. exe 同目录的内置 sidecar（externalBin 安装布局；Windows 加
+    ///    CREATE_NO_WINDOW 防控制台闪窗）
+    /// 3. 开发态回退 `python3 sidecar-python/sidecar.py`（cwd 锚仓库根）
     pub async fn spawn_default() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let cmd_str = std::env::var("WXAUTO_SIDECAR_CMD")
-            .unwrap_or_else(|_| crate::cli::DEFAULT_SIDECAR_CMD.into());
-        let mut parts = cmd_str.split_whitespace();
-        let program = parts.next().unwrap_or("python3");
-        let mut cmd = Command::new(program);
-        cmd.args(parts)
-            .stdin(Stdio::piped())
+        let mut cmd = if let Ok(cmd_str) = std::env::var("WXAUTO_SIDECAR_CMD") {
+            let (program, args) = crate::cli::parse_sidecar_cmd(&cmd_str);
+            let mut c = Command::new(program);
+            c.args(args);
+            c
+        } else if let Some(bundled) = crate::cli::find_bundled_sidecar() {
+            let mut c = Command::new(&bundled);
+            apply_windows_no_window(&mut c);
+            tracing::info!(path = %bundled, "使用内置 sidecar（安装态）");
+            c
+        } else {
+            let mut c = Command::new("python3");
+            c.arg("sidecar-python/sidecar.py");
+            if let Some(root) = crate::cli::resolve_sidecar_workdir() {
+                c.current_dir(root);
+            }
+            c
+        };
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        if std::env::var("WXAUTO_SIDECAR_CMD").is_err() {
-            if let Some(root) = crate::cli::resolve_sidecar_workdir() {
-                cmd.current_dir(root);
-            }
-        }
         Self::do_spawn(cmd).await
     }
 
@@ -370,3 +378,16 @@ fn find_python() -> String {
     }
     "python3".into()
 }
+
+/// Windows GUI 进程 spawn 控制台子进程时加 CREATE_NO_WINDOW（防黑窗闪烁）；
+/// 非 Windows 空操作。tokio Command 与 std Command 的 creation_flags 在
+/// Windows 上 API 一致。
+#[cfg(windows)]
+fn apply_windows_no_window(cmd: &mut Command) {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn apply_windows_no_window(_cmd: &mut Command) {}

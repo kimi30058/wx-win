@@ -17,6 +17,51 @@ use crate::sidecar::SidecarHandle;
 /// sidecar spawn 默认命令（相对仓库根的布局：desktop/sidecar-python/）
 pub const DEFAULT_SIDECAR_CMD: &str = "python3 sidecar-python/sidecar.py";
 
+/// 安装包内置 sidecar exe 文件名（externalBin 约定：名称-target-triple）。
+/// Windows NSIS 安装后与主程序同目录；triple 用编译期常量而非 rustc 探测
+/// （打包机与安装机 triple 一致——MSVC x64 发布目标固定）。
+#[cfg(windows)]
+pub const BUNDLED_SIDECAR_NAME: &str = "wxauto-sidecar-x86_64-pc-windows-msvc.exe";
+#[cfg(not(windows))]
+pub const BUNDLED_SIDECAR_NAME: &str = "wxauto-sidecar";
+
+/// exe 同目录探测内置 sidecar（安装态）：命中返回绝对路径。
+/// 开发态（target/debug 等目录）无此文件 → None 走回退链。
+pub fn find_bundled_sidecar() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let candidate = dir.join(BUNDLED_SIDECAR_NAME);
+    candidate.is_file().then(|| candidate.to_string_lossy().into_owned())
+}
+
+/// 解析 sidecar 启动命令字符串 → (program, args)。
+/// 支持 Windows 引号语义：`"C:\Program Files\x\sidecar.exe" --flag` 的
+/// 程序路径含空格不能按裸空格拆（终审 follow-up #2：原 split_whitespace
+/// 会拆坏含空格路径）。双引号包裹段视为整体；连续空白分隔 token。
+pub fn parse_sidecar_cmd(cmd_str: &str) -> (String, Vec<String>) {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    for ch in cmd_str.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            c if c.is_whitespace() && !in_quotes => {
+                if !cur.is_empty() {
+                    tokens.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    match tokens.split_first() {
+        Some((head, rest)) => (head.clone(), rest.to_vec()),
+        None => ("python3".into(), Vec::new()),
+    }
+}
+
 /// sidecar 默认工作目录：从可执行文件路径向上找仓库根（父链上第一个含
 /// desktop/sidecar-python/ 的目录），返回其下的 `desktop/` 目录——
 /// DEFAULT_SIDECAR_CMD 的相对路径 `sidecar-python/sidecar.py` 以它为基准。
@@ -109,5 +154,51 @@ mod tests {
             build_ws_url("ws://127.0.0.1:60021", ""),
             "ws://127.0.0.1:60021"
         );
+    }
+
+    /// 引号包裹的含空格路径不被拆坏（follow-up #2 回归）
+    #[test]
+    fn test_parse_sidecar_cmd_quoted_path_with_spaces() {
+        let (prog, args) = parse_sidecar_cmd(
+            "\"C:\\Program Files\\wxauto\\wxauto-sidecar.exe\" --mock",
+        );
+        assert_eq!(prog, r"C:\Program Files\wxauto\wxauto-sidecar.exe");
+        assert_eq!(args, vec!["--mock"]);
+    }
+
+    /// 无引号裸命令：按空白拆分，行为与旧 split_whitespace 一致
+    #[test]
+    fn test_parse_sidecar_cmd_plain() {
+        let (prog, args) = parse_sidecar_cmd("python3 sidecar-python/sidecar.py");
+        assert_eq!(prog, "python3");
+        assert_eq!(args, vec!["sidecar-python/sidecar.py"]);
+    }
+
+    /// 空串 / 纯空白：兜底 python3 无参（与旧实现一致）
+    #[test]
+    fn test_parse_sidecar_cmd_empty() {
+        let (prog, args) = parse_sidecar_cmd("   ");
+        assert_eq!(prog, "python3");
+        assert!(args.is_empty());
+    }
+
+    /// 引号内空格保留（token 内部空白不拆）
+    #[test]
+    fn test_parse_sidecar_cmd_space_inside_quotes() {
+        let (prog, _args) = parse_sidecar_cmd("\"my sidecar.py\"");
+        assert_eq!(prog, "my sidecar.py");
+    }
+
+    /// bundled 探测：当前测试环境（开发态）必不命中；文件名常量跨平台有值
+    #[test]
+    fn test_find_bundled_sidecar_dev_env_miss() {
+        // 开发态 exe 在 src-tauri/target/** 下，同目录无 bundled exe
+        let r = find_bundled_sidecar();
+        if let Some(path) = r {
+            // 若命中（异常布局），至少应是存在的绝对路径文件
+            assert!(std::path::Path::new(&path).is_file(), "命中路径必须存在: {path}");
+        }
+        // 常量非空（编译期保证各平台有定义）
+        assert!(!BUNDLED_SIDECAR_NAME.is_empty());
     }
 }

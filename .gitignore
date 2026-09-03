@@ -16,3 +16,7 @@ __pycache__/
 
 # 日志
 *.log
+# PyInstaller 构建产物（CI 现场生成，不入库；.gitkeep 例外保目录）
+build/
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
