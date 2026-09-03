@@ -52,10 +52,22 @@ jobs:
         run: |
           $bundle = "src-tauri/target/release/bundle"
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          # NSIS 主安装包 + 语言包（存在才收）
-          Get-ChildItem "$bundle/nsis/*.exe" -ErrorAction SilentlyContinue |
-            Copy-Item -Destination artifacts/
+          # 递归收集 bundle 下全部 exe（NSIS 安装包 + 语言包，路径防御式搜索）
+          if (Test-Path $bundle) {
+            Get-ChildItem -Path $bundle -Recurse -Filter *.exe -ErrorAction SilentlyContinue |
+              Copy-Item -Destination artifacts/
+          }
           if (-not (Get-ChildItem artifacts/*.exe -ErrorAction SilentlyContinue)) {
+            Write-Host "== 诊断：bundle 目录树 =="
+            if (Test-Path $bundle) {
+              Get-ChildItem -Path $bundle -Recurse | ForEach-Object { $_.FullName }
+            } else {
+              Write-Host "bundle 目录不存在: $bundle"
+              Write-Host "== 诊断：target/release 一级内容 =="
+              Get-ChildItem "src-tauri/target/release" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }
+              Write-Host "== 诊断：target 一级内容 =="
+              Get-ChildItem "src-tauri/target" -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }
+            }
             throw "未找到 NSIS 安装包产物"
           }
           Get-ChildItem artifacts/
