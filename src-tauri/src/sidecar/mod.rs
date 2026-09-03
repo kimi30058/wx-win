@@ -30,6 +30,15 @@ pub const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 /// 通知 broadcast 通道容量（消息突发时慢订阅者丢旧保新，不阻塞读循环）
 const NOTIFY_CHANNEL_CAPACITY: usize = 256;
 
+/// sidecar stderr 行消费者（GUI 注入写日志环形缓冲；CLI 不注入=stderr
+/// inherit 原行为——零回归铁律）。
+/// trait 定义在 lib、实现在 bin（`ui_log::RingStderrSink`）——lib 不能
+/// 反向依赖 bin，故以注入反转依赖方向。
+pub trait StderrSink: Send + Sync + 'static {
+    /// 消费一行（不含换行符）
+    fn consume(&self, line: String);
+}
+
 /// 共享态：读循环 / call / 订阅者三方共同持有
 struct Shared {
     writer: Mutex<ChildStdin>,
@@ -57,21 +66,29 @@ pub struct SidecarHandle {
 }
 
 impl SidecarHandle {
-    /// 用 python 解释器跑内联脚本（测试 / 嵌入式启动用）
+    /// 用 python 解释器跑内联脚本（测试 / 嵌入式启动用；stderr inherit）
     pub async fn spawn_with_python(
         script: &str,
         envs: &[(&str, &str)],
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::spawn_with_python_sunk(script, envs, None).await
+    }
+
+    /// 同 spawn_with_python，但可注入 stderr sink（Some → piped 逐行消费）
+    pub async fn spawn_with_python_sunk(
+        script: &str,
+        envs: &[(&str, &str)],
+        stderr_sink: Option<Arc<dyn StderrSink>>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut cmd = Command::new(find_python());
         cmd.arg("-c")
             .arg(script)
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stdout(Stdio::piped());
         for (k, v) in envs {
             cmd.env(k, v);
         }
-        Self::do_spawn(cmd).await
+        Self::do_spawn(cmd, stderr_sink).await
     }
 
     /// sidecar 启动解析优先级（安装态开箱即用 → 开发态回退）：
@@ -80,14 +97,20 @@ impl SidecarHandle {
     ///    CREATE_NO_WINDOW 防控制台闪窗）
     /// 3. 开发态回退 `python3 sidecar-python/sidecar.py`（cwd 锚仓库根）
     pub async fn spawn_default() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::spawn_default_sunk(None).await
+    }
+
+    /// 同 spawn_default，但可注入 stderr sink
+    pub async fn spawn_default_sunk(
+        stderr_sink: Option<Arc<dyn StderrSink>>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut cmd = if let Ok(cmd_str) = std::env::var("WXAUTO_SIDECAR_CMD") {
             let (program, args) = crate::cli::parse_sidecar_cmd(&cmd_str);
             let mut c = Command::new(program);
             c.args(args);
             c
         } else if let Some(bundled) = crate::cli::find_bundled_sidecar() {
-            let mut c = Command::new(&bundled);
-            apply_windows_no_window(&mut c);
+            let c = Command::new(&bundled);
             tracing::info!(path = %bundled, "使用内置 sidecar（安装态）");
             c
         } else {
@@ -98,14 +121,25 @@ impl SidecarHandle {
             }
             c
         };
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        Self::do_spawn(cmd).await
+        // CREATE_NO_WINDOW 三路径齐备（cmd 级/env 覆盖/回退）——piped 后
+        // 双保险：Windows GUI 父进程下任何控制台闪窗都不允许
+        apply_windows_no_window(&mut cmd);
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
+        Self::do_spawn(cmd, stderr_sink).await
     }
 
-    /// 实际 spawn：取管道、建共享态、挂读循环 + 退出 reaper
-    async fn do_spawn(mut cmd: Command) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    /// 实际 spawn：取管道、建共享态、挂读循环 + 退出 reaper。
+    /// stderr 策略：sink=Some → piped + 读循环逐行消费（GUI 日志 tab 数据
+    /// 源）；None → inherit（CLI 原行为零回归）。
+    async fn do_spawn(
+        mut cmd: Command,
+        stderr_sink: Option<Arc<dyn StderrSink>>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        if stderr_sink.is_some() {
+            cmd.stderr(Stdio::piped());
+        } else {
+            cmd.stderr(Stdio::inherit());
+        }
         // Child 整体移交 reaper（wait/kill/回收都在 reaper 内）；
         // kill_on_drop 不再适用——句柄不再拥有 Child，
         // 兜底 kill 由 shutdown（显式）与 reaper（wait 回收）承担。
@@ -132,6 +166,9 @@ impl SidecarHandle {
             kill_tx,
         });
         spawn_reader(shared.clone(), stdout);
+        if let (Some(sink), Some(stderr)) = (stderr_sink, child.stderr.take()) {
+            spawn_stderr_reader(sink, stderr);
+        }
         // 退出 reaper：独占 Child 做 wait（+ 代杀请求）。回收（僵尸 reap）
         // 由 reaper 的 wait 完成；显式终止走 shutdown → kill 通道。
         spawn_reaper(child, shared.exit_tx.clone(), kill_rx);
@@ -356,6 +393,31 @@ fn spawn_reader(shared: Arc<Shared>, stdout: tokio::process::ChildStdout) {
                     tracing::error!("读 sidecar stdout 出错: {e}，读循环退出");
                     shared.closed.store(true, Ordering::Release);
                     SidecarHandle::fail_all_pending(&shared, RpcError::Closed).await;
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// sidecar stderr 读循环：逐行消费进 sink；EOF/IO 错退出（sidecar 死亡
+/// 时管道关闭，reaper 负责回收，此处只管读）。空行跳过。
+fn spawn_stderr_reader(sink: Arc<dyn StderrSink>, stderr: tokio::process::ChildStderr) {
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end();
+                    if !trimmed.is_empty() {
+                        sink.consume(trimmed.to_string());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("读 sidecar stderr 出错: {e}，stderr 读循环退出");
                     break;
                 }
             }

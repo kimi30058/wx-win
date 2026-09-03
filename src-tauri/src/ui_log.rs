@@ -196,6 +196,29 @@ where
     }
 }
 
+/// sidecar stderr → ring 的 sink 实现（含关键字升 error 判定，spec §4：
+/// Python 侧无级别概念，统一 info；含 ERROR/Traceback 关键字升 error）。
+/// 消费接线在 Task 4（gui.rs 注入 spawn_default_sunk）——项级放行
+/// dead_code，届时移除。
+#[allow(dead_code)]
+pub struct RingStderrSink(pub LogRing);
+
+impl wxauto_desktop::sidecar::StderrSink for RingStderrSink {
+    fn consume(&self, line: String) {
+        let level = if line.contains("ERROR") || line.contains("Traceback") {
+            AppLogLevel::Error
+        } else {
+            AppLogLevel::Info
+        };
+        self.0.push(AppLogEntry {
+            ts: now_ms(),
+            level,
+            source: AppLogSource::Sidecar,
+            message: line,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +353,20 @@ mod tests {
         assert_eq!(j["level"], "error");
         assert_eq!(j["source"], "sidecar");
         assert_eq!(j["message"], "boom");
+    }
+
+    #[test]
+    fn test_ring_stderr_sink_promotes_traceback_to_error() {
+        let ring = LogRing::new(10);
+        let sink = RingStderrSink(ring.clone());
+        wxauto_desktop::sidecar::StderrSink::consume(&sink, "普通行".into());
+        wxauto_desktop::sidecar::StderrSink::consume(
+            &sink,
+            "Traceback (most recent call last):".into(),
+        );
+        let snap = ring.snapshot();
+        assert_eq!(snap[0].level, AppLogLevel::Info);
+        assert_eq!(snap[0].source, AppLogSource::Sidecar);
+        assert_eq!(snap[1].level, AppLogLevel::Error, "Traceback 应升 error");
     }
 }
