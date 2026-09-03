@@ -22,6 +22,7 @@ mod app_state;
 mod commands;
 mod gui;
 mod ui_events;
+mod ui_log;
 
 use std::io::IsTerminal;
 
