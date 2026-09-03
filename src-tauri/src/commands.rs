@@ -90,3 +90,20 @@ pub fn get_app_state(ctx: State<'_, AppStateCtx>) -> String {
         None => "SidecarBooting".to_string(),
     }
 }
+
+/// 运行日志快照（旧在前；前端 init 时补齐 attach 前的历史——
+/// tauri 事件无重放，对齐 get_app_state 补首值模式）
+#[tauri::command]
+pub fn get_recent_logs(ctx: State<'_, AppStateCtx>) -> Vec<serde_json::Value> {
+    ctx.log_ring
+        .snapshot()
+        .iter()
+        .map(|e| serde_json::to_value(e).unwrap_or_default())
+        .collect()
+}
+
+/// 清空运行日志（前端「清空」按钮）
+#[tauri::command]
+pub fn clear_logs(ctx: State<'_, AppStateCtx>) {
+    ctx.log_ring.clear();
+}

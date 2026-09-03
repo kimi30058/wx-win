@@ -70,6 +70,9 @@ pub struct AppStateCtx {
     inner: std::sync::Arc<tokio::sync::OnceCell<Result<Arc<Assembled>, String>>>,
     /// 事件桥（装配前即可用——shell 阶段注入 AppHandle，先到的事件不丢）
     pub bridge: UiEventBridge,
+    /// 运行日志环形缓冲（「运行日志」tab 数据源：tracing Layer + sidecar
+    /// stderr sink 双入口写；get_recent_logs/clear_logs 命令读写）
+    pub log_ring: crate::ui_log::LogRing,
     /// 配置文件路径（装配读 + 保存写共用）
     config_path: std::path::PathBuf,
 }
@@ -82,6 +85,7 @@ impl Clone for AppStateCtx {
         Self {
             inner: self.inner.clone(),
             bridge: self.bridge.clone(),
+            log_ring: self.log_ring.clone(),
             config_path: self.config_path.clone(),
         }
     }
@@ -280,10 +284,15 @@ for line in sys.stdin:
 
 impl AppStateCtx {
     /// 同步壳构造（setup 里 manage——invoke 时刻必有状态可寻）
-    pub fn shell(config_path: std::path::PathBuf, bridge: UiEventBridge) -> Self {
+    pub fn shell(
+        config_path: std::path::PathBuf,
+        bridge: UiEventBridge,
+        log_ring: crate::ui_log::LogRing,
+    ) -> Self {
         Self {
             inner: std::sync::Arc::new(tokio::sync::OnceCell::new()),
             bridge,
+            log_ring,
             config_path,
         }
     }
@@ -295,11 +304,18 @@ impl AppStateCtx {
             .get_or_init(|| async {
                 let bridge = self.bridge.clone();
                 let config_path = self.config_path.clone();
+                let log_ring = self.log_ring.clone();
                 let cfg =
                     config::load_config(&config_path).map_err(|e| format!("配置读取失败: {e}"))?;
 
-                // 1. 首代 sidecar（失败即装配失败——GUI 起不来要有明确报错）
-                let sidecar = SidecarHandle::spawn_default()
+                // 1. 首代 sidecar（失败即装配失败——GUI 起不来要有明确报错）。
+                //    stderr 注入 ring sink：sidecar 日志进「运行日志」tab
+                //    （spec §4 source=sidecar；CLI 不走本装配，零回归）。
+                //    必须走 spawn_default_sunk（含 CREATE_NO_WINDOW 防闪窗，
+                //    Task 3 审查者提示：勿退回 spawn_with_python_sunk）
+                let stderr_sink: std::sync::Arc<dyn wxauto_desktop::sidecar::StderrSink> =
+                    std::sync::Arc::new(crate::ui_log::RingStderrSink(log_ring));
+                let sidecar = SidecarHandle::spawn_default_sunk(Some(stderr_sink))
                     .await
                     .map_err(|e| format!("sidecar 启动失败: {e}"))?;
                 let sidecar = Arc::new(Mutex::new(sidecar));

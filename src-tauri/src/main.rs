@@ -18,6 +18,12 @@
 //! 退出路径（Task 6 审查硬性输入 #1）：CLI Ctrl-C / GUI 窗口全关 →
 //! graceful_shutdown 显式回收 sidecar（活进程回收唯一路径——kill_on_drop
 //! 已移除）→ 退出。
+
+// Windows release 构建不附控制台窗口（debug 保留——dev 排障看日志）。
+// 「只显示日志的 cmd 窗口」根因 1 修复（spec §2）；debug_assertions 保证
+// 开发构建行为不变。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app_state;
 mod commands;
 mod gui;

@@ -15,7 +15,6 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 /// 日志级别（前端契约：小写字符串）
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AppLogLevel {
@@ -40,7 +39,6 @@ impl AppLogLevel {
 }
 
 /// 日志来源：rust=应用自身 / sidecar=Python 子进程 stderr
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AppLogSource {
@@ -59,7 +57,6 @@ impl AppLogSource {
 }
 
 /// 一条运行日志（`wxauto://app-log` 事件载荷，字段即前端契约）
-#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AppLogEntry {
     pub ts: u64,
@@ -70,7 +67,6 @@ pub struct AppLogEntry {
 
 /// 环形缓冲：内部 Mutex<VecDeque>，满弹最旧。Clone 共享同一槽位
 /// （tracing Layer / sidecar 读循环 / invoke 快照各持一份克隆）。
-#[allow(dead_code)]
 #[derive(Clone)]
 pub struct LogRing {
     inner: Arc<Mutex<VecDeque<AppLogEntry>>>,
@@ -78,7 +74,6 @@ pub struct LogRing {
 }
 
 impl LogRing {
-    #[allow(dead_code)]
     pub fn new(cap: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(VecDeque::new())),
@@ -88,7 +83,6 @@ impl LogRing {
 
     /// 追加一条；超上限弹最旧。锁中毒（panic 传染）按清空恢复——
     /// 日志缓冲是旁路观察者，不允许它把业务线程拖死。
-    #[allow(dead_code)]
     pub fn push(&self, entry: AppLogEntry) {
         let mut q = self
             .inner
@@ -101,7 +95,6 @@ impl LogRing {
     }
 
     /// 全量快照（旧在前；前端头插展示）
-    #[allow(dead_code)]
     pub fn snapshot(&self) -> Vec<AppLogEntry> {
         self.inner
             .lock()
@@ -112,7 +105,6 @@ impl LogRing {
     }
 
     /// 清空（前端「清空」按钮）
-    #[allow(dead_code)]
     pub fn clear(&self) {
         self.inner
             .lock()
@@ -122,7 +114,6 @@ impl LogRing {
 }
 
 /// 毫秒时间戳（LogRing 条目与测试共用；集中一处便于将来换时钟注入）
-#[allow(dead_code)]
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -131,7 +122,6 @@ pub fn now_ms() -> u64 {
 }
 
 /// tracing 事件 → AppLogEntry 的字段收集器（只收 `message` 字段）
-#[allow(dead_code)]
 struct MessageFieldVisitor {
     message: String,
 }
@@ -152,14 +142,12 @@ impl tracing::field::Visit for MessageFieldVisitor {
 
 /// tracing Layer：每条事件格式化成 AppLogEntry → push ring + try_send mpsc。
 /// mpsc 满则丢行（旁路观察者不反压业务线程——与 UiEventBridge 同哲学）。
-#[allow(dead_code)]
 pub struct UiLogLayer {
     ring: LogRing,
     sink: tokio::sync::mpsc::Sender<AppLogEntry>,
 }
 
 impl UiLogLayer {
-    #[allow(dead_code)]
     pub fn new(ring: LogRing, sink: tokio::sync::mpsc::Sender<AppLogEntry>) -> Self {
         Self { ring, sink }
     }
@@ -200,7 +188,6 @@ where
 /// Python 侧无级别概念，统一 info；含 ERROR/Traceback 关键字升 error）。
 /// 消费接线在 Task 4（gui.rs 注入 spawn_default_sunk）——项级放行
 /// dead_code，届时移除。
-#[allow(dead_code)]
 pub struct RingStderrSink(pub LogRing);
 
 impl wxauto_desktop::sidecar::StderrSink for RingStderrSink {

@@ -25,23 +25,40 @@ use crate::app_state::AppStateCtx;
 // generate_handler! 需要各命令模块内宏生成的 __cmd__* 就位——通配导入
 use crate::commands::*;
 use crate::ui_events::UiEventBridge;
+use crate::ui_log::{LogRing, UiLogLayer};
+// registry().with(...) 组合层与 .init() 分别需 SubscriberExt /
+// SubscriberInitExt trait 在作用域
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// 退出时等 sidecar 回收的上限（对齐 CLI 的 SHUTDOWN_TIMEOUT）
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 运行日志环形缓冲上限（spec §5：1000 条）
+const LOG_RING_CAPACITY: usize = 1000;
+
 /// GUI 模式启动（阻塞跑事件循环；返回 = 窗口已关）
 pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // 日志初始化（GUI 无控制台，默认 info 级走 stderr；排障设 RUST_LOG）。
+    // 日志初始化：registry 组合三层——
+    // 1. fmt 层 → stderr（GUI 无控制台时输出被丢弃/重定向，dev 排障用）
+    // 2. UI 层 → 内存环形缓冲（「运行日志」tab 数据源，经 mpsc 转发桥 emit）
+    // 3. EnvFilter（默认 info；排障设 RUST_LOG）
     // ANSI 只在 stderr 是 tty 时开——GUI 子系统 stderr 常为管道/无效句柄,
     // 输出被重定向到文件或无 ANSI 解析的查看器时颜色码全变乱码
     // （2026-09-03 真机日志反馈）。tracing-subscriber 自身只认 NO_COLOR
     // 不检测 tty,这里显式判定。
-    tracing_subscriber::fmt()
-        .with_ansi(std::io::stderr().is_terminal())
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    let ring = LogRing::new(LOG_RING_CAPACITY);
+    let (log_tx, log_rx) = tauri::async_runtime::channel::<crate::ui_log::AppLogEntry>(256);
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(std::io::stderr().is_terminal())
+                .with_writer(std::io::stderr),
         )
+        .with(UiLogLayer::new(ring.clone(), log_tx))
+        .with(env_filter)
         .init();
 
     // tauri 自管 runtime（内部 tokio）；async 装配经 setup 里的 spawn 进入
@@ -56,14 +73,16 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             connect,
             disconnect,
             get_app_state,
+            get_recent_logs,
+            clear_logs,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             // ① 同步 manage 壳（invoke 从此可寻；装配在 OnceCell 内进行）。
             //    manage 裸 AppStateCtx——与 commands 的 State<'_, AppStateCtx>
             //    类型键严格一致（C1：StateManager 按 TypeId 匹配，多包一层
             //    Arc 即全量 invoke「state not managed」）。
             let bridge = UiEventBridge::new();
-            let ctx = AppStateCtx::shell(default_config_path(), bridge.clone());
+            let ctx = AppStateCtx::shell(default_config_path(), bridge.clone(), ring.clone());
             // 装配任务持克隆（AppStateCtx: Clone——内部全 Arc 槽位，浅克隆
             // 共享同一 OnceCell/bridge；manage 侧仍是裸值，类型键不变）
             let ctx_for_setup = ctx.clone();
@@ -71,7 +90,7 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             // ② async 装配（sidecar spawn 等）——commands 的 ready().await 等它
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = setup_async(&handle, &ctx_for_setup, &bridge).await {
+                if let Err(e) = setup_async(&handle, &ctx_for_setup, &bridge, log_rx).await {
                     // 装配失败不退出窗口：前端 invoke 会拿到明确错误
                     //（manual_execute 等 reject「sidecar 启动失败…」），
                     // 设置页可排查；日志留痕。
@@ -111,15 +130,29 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-/// async 装配：attach 事件桥 → assemble（sidecar→session→state→supervisor）
-/// → spawn Supervisor（句柄留存供退出 abort）→ autoConnect 自动连接。
+/// async 装配：attach 事件桥 → 日志转发任务 → assemble（sidecar→session→
+/// state→supervisor）→ spawn Supervisor（句柄留存供退出 abort）→
+/// autoConnect 自动连接。
 async fn setup_async(
     handle: &tauri::AppHandle,
     ctx: &AppStateCtx,
     bridge: &UiEventBridge,
+    mut log_rx: tauri::async_runtime::Receiver<crate::ui_log::AppLogEntry>,
 ) -> Result<(), String> {
     // 事件桥先 attach（后续状态推进的事件全部可达前端）
     bridge.attach(handle.clone()).await;
+    // 日志转发任务：mpsc → 桥 emit（emit 失败仅 tracing，不断主链路）。
+    // bridge 已 attach 后再启动——转发任务的每条都能到达前端
+    {
+        let bridge = bridge.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(entry) = log_rx.recv().await {
+                bridge
+                    .forward_app_log(&serde_json::to_value(&entry).unwrap_or_default())
+                    .await;
+            }
+        });
+    }
     // 装配（幂等：commands 的 ready() 已触发过则直取结果）
     let assembled = ctx.assemble_into().await?;
     // Supervisor 主循环（sidecar 域：init 序列 + 崩溃退避重启）。
@@ -164,7 +197,11 @@ mod tests {
             .expect("mock app 构建失败");
 
         // 与生产 setup 相同的 manage 形态：裸 AppStateCtx（非 Arc 包裹）
-        let ctx = AppStateCtx::shell(default_config_path(), UiEventBridge::new());
+        let ctx = AppStateCtx::shell(
+            default_config_path(),
+            UiEventBridge::new(),
+            crate::ui_log::LogRing::new(10),
+        );
         app.manage(ctx);
 
         let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -203,5 +240,58 @@ mod tests {
             }
             Err(e) => panic!("invoke reject 即 C1 回归（manage/State 类型键不匹配）: {e}"),
         }
+    }
+
+    /// get_recent_logs 命令：ring 有两条时快照返回（旧在前）
+    #[tokio::test]
+    async fn test_invoke_get_recent_logs_returns_snapshot() {
+        use crate::ui_log::{AppLogEntry, AppLogLevel, AppLogSource, LogRing};
+
+        let app = tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![get_recent_logs])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app 构建失败");
+
+        let ring = LogRing::new(10);
+        ring.push(AppLogEntry {
+            ts: 1,
+            level: AppLogLevel::Info,
+            source: AppLogSource::Rust,
+            message: "先".into(),
+        });
+        ring.push(AppLogEntry {
+            ts: 2,
+            level: AppLogLevel::Warn,
+            source: AppLogSource::Sidecar,
+            message: "后".into(),
+        });
+        // 与生产 setup 相同的 manage 形态（shell 增 log_ring 参数后）
+        let ctx = AppStateCtx::shell(default_config_path(), UiEventBridge::new(), ring);
+        app.manage(ctx);
+
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview 构建失败");
+
+        let resp = tauri::test::get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: "get_recent_logs".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().expect("url 解析失败"),
+                body: tauri::ipc::InvokeBody::default(),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+        .map(|b| {
+            b.deserialize::<Vec<serde_json::Value>>()
+                .expect("响应应为数组")
+        });
+        let logs = resp.expect("invoke 不应 reject");
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0]["message"], "先");
+        assert_eq!(logs[1]["level"], "warn");
     }
 }

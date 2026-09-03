@@ -31,6 +31,8 @@ pub const EVENT_STATE: &str = "wxauto://state";
 pub const EVENT_STATUS: &str = "wxauto://status";
 pub const EVENT_MESSAGE: &str = "wxauto://message";
 pub const EVENT_COMMAND_LOG: &str = "wxauto://command-log";
+/// 运行日志事件名（与 desktop/src/stores/app.ts 的 listen() 字面量一致）
+pub const EVENT_APP_LOG: &str = "wxauto://app-log";
 
 /// 事件发射后端：抹平 AppHandle 的 Runtime 泛型（生产 Wry / 测试 MockRuntime），
 /// 桥内只持 trait object——attach 侧泛型收敛。
@@ -117,6 +119,11 @@ impl UiEventBridge {
     pub async fn forward_command_log(&self, entry: &Value) {
         self.emit(EVENT_COMMAND_LOG, entry).await;
     }
+
+    /// 运行日志条（转发任务直通；entry 序列化字段即前端契约）
+    pub async fn forward_app_log(&self, entry: &Value) {
+        self.emit(EVENT_APP_LOG, entry).await;
+    }
 }
 
 /// AppState → 变体名（与前端 AppStateName 六值精确一致）
@@ -166,5 +173,18 @@ mod tests {
         let out = with_ws_connected(&frame, true);
         assert_eq!(out["wsConnected"], true);
         assert_eq!(out["data"]["wxOnline"], true, "原字段保留");
+    }
+
+    /// app-log 转发：entry JSON 经桥发射（payload 结构即前端契约）
+    #[tokio::test]
+    async fn test_forward_app_log_emits_entry() {
+        let bridge = UiEventBridge::new();
+        // 未 attach 时 emit 走丢弃分支不 panic——本测试主要覆盖编译期
+        // 契约与方法存在性；真实发射在 gui_bridge 集成测试覆盖。
+        bridge
+            .forward_app_log(&serde_json::json!({
+                "ts": 1, "level": "info", "source": "rust", "message": "m"
+            }))
+            .await;
     }
 }
