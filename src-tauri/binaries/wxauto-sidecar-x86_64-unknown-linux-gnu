@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Linux 开发态 externalBin 占位（tauri-build 要求 binaries/<name>-<triple> 存在,
+# 且 build 时会复制到 src-tauri/target/<profile>/ 并去掉 triple 后缀）。
+# 真实打包在 Windows CI 冻结 wxauto-sidecar-x86_64-pc-windows-msvc.exe。
+# 本脚本被 Rust bundled 探测命中时（exe 同目录的 wxauto-sidecar）转发
+# python sidecar——脚本运行位置是 src-tauri/target/debug|release/,向上
+# 四级才是 desktop/ 根。找不到 sidecar.py 时用父链探测兜底（容错布局）。
+set -euo pipefail
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+DIR="$(dirname "$SELF")"
+ROOT=""
+for _ in 1 2 3 4 5; do
+  DIR="$(cd "$DIR/.." && pwd)"
+  if [ -f "$DIR/sidecar-python/sidecar.py" ]; then ROOT="$DIR"; break; fi
+done
+if [ -z "$ROOT" ]; then
+  echo "wxauto-sidecar 占位脚本: 向上找不到 sidecar-python/sidecar.py" >&2
+  exit 1
+fi
+exec python3 "$ROOT/sidecar-python/sidecar.py" "$@"

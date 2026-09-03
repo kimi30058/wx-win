@@ -20,3 +20,4 @@ __pycache__/
 build/
 src-tauri/binaries/*
 !src-tauri/binaries/.gitkeep
+!src-tauri/binaries/wxauto-sidecar-x86_64-unknown-linux-gnu

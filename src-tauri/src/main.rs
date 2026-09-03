@@ -23,6 +23,8 @@ mod commands;
 mod gui;
 mod ui_events;
 
+use std::io::IsTerminal;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,6 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 #[tokio::main]
 async fn run_cli() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
+        // stderr 非 tty（管道/重定向）时关 ANSI 防乱码,对齐 gui.rs
+        .with_ansi(std::io::stderr().is_terminal())
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),

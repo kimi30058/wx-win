@@ -38,6 +38,11 @@ pub const RESTART_BACKOFF: [Duration; 5] = [
 /// 病态，尽快进入崩溃处理循环（见 direct_wx_init 注释）
 const INIT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// 「活够久」阈值：sidecar 存活超过该时长后崩溃,失败计数才在重启时清零。
+/// spawn 成功但立即退出（Windows 9009 找不到命令 / 杀软删 exe）不清零——
+/// 否则 1s 退避无限循环,永不进 SidecarDead（2026-09-03 真机日志定位）。
+const SIDECAR_MIN_UPTIME: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppState {
     SidecarDead,
@@ -270,6 +275,10 @@ impl Supervisor {
     /// 由 CLI main / tauri runtime spawn，永不出错返回（错误全在循环内消化）。
     pub async fn run(&self) {
         let mut failures: usize = 0;
+        // 当前 sidecar 的 spawn 时刻：退出时判「活够久」（SIDECAR_MIN_UPTIME）
+        // 决定失败计数是否清零。首代 sidecar 由装配方先 spawn——Supervisor
+        // 启动时它已在跑,取当前时刻为近似出生点（偏差只会让清零更保守）。
+        let mut spawned_at = tokio::time::Instant::now();
         loop {
             // 1. init 序列（wx.init + 监听 resync + 状态推进 + status 事件）
             *self.phase.write().await = "init_sequence";
@@ -278,8 +287,10 @@ impl Supervisor {
             // 2. 等待当前 sidecar 退出（Booting/WxInit/Ready/Degraded 任一态下都可能发生）
             *self.phase.write().await = "await_exit";
             let mut exit_rx = self.session.sidecar_exit_watcher().await;
+            let uptime = tokio::time::Instant::now() - spawned_at;
+            let lived_long_enough = uptime >= SIDECAR_MIN_UPTIME;
             match SidecarHandle::await_exit(&mut exit_rx).await {
-                Some(status) => tracing::warn!(?status, failures, "sidecar 退出，准备退避重启"),
+                Some(status) => tracing::warn!(?status, failures, ?uptime, "sidecar 退出，准备退避重启"),
                 None => {
                     // 观察通道意外关闭（理论上 reaper 不死；防御性退出避免忙转）
                     tracing::error!("sidecar 退出观察通道关闭，Supervisor 停止");
@@ -288,7 +299,9 @@ impl Supervisor {
                 }
             }
 
-            // 3. 退避 → 重启（失败计数含 spawn 失败；成功清零）
+            // 3. 退避 → 重启。失败计数：sidecar 没活够久（立即死——Windows
+            //    9009 找不到命令/杀软删 exe）不清零,让退避逐级升到
+            //    SidecarDead 终态;活够久才清零（正常偶发崩溃重新计数）。
             *self.phase.write().await = "backoff";
             failures += 1;
             match self.backoff_table.get(failures.wrapping_sub(1)).copied() {
@@ -312,7 +325,10 @@ impl Supervisor {
             match (self.spawner)().await {
                 Ok(new_handle) => {
                     self.session.replace_sidecar(new_handle).await;
-                    failures = 0; // 起来过就算活（后续崩溃重新计数）
+                    spawned_at = tokio::time::Instant::now();
+                    if lived_long_enough {
+                        failures = 0; // 活够久的偶发崩溃：重新计数
+                    }
                 }
                 Err(e) => {
                     tracing::error!(%e, failures, "sidecar 重启 spawn 失败");

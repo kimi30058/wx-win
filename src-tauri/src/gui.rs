@@ -12,6 +12,8 @@
 //! 事件桥 attach 在装配 spawn 的首步（先于 sidecar spawn / Supervisor
 //! init 推进）——首批状态事件不丢（前端 init 经 get_app_state 亦可补齐）。
 
+use std::io::IsTerminal;
+
 use std::time::Duration;
 
 use tauri::{Manager, RunEvent};
@@ -29,8 +31,13 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// GUI 模式启动（阻塞跑事件循环；返回 = 窗口已关）
 pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // 日志初始化（GUI 无控制台，默认 info 级走 stderr；排障设 RUST_LOG）
+    // 日志初始化（GUI 无控制台，默认 info 级走 stderr；排障设 RUST_LOG）。
+    // ANSI 只在 stderr 是 tty 时开——GUI 子系统 stderr 常为管道/无效句柄,
+    // 输出被重定向到文件或无 ANSI 解析的查看器时颜色码全变乱码
+    // （2026-09-03 真机日志反馈）。tracing-subscriber 自身只认 NO_COLOR
+    // 不检测 tty,这里显式判定。
     tracing_subscriber::fmt()
+        .with_ansi(std::io::stderr().is_terminal())
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),

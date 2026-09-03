@@ -17,21 +17,33 @@ use crate::sidecar::SidecarHandle;
 /// sidecar spawn 默认命令（相对仓库根的布局：desktop/sidecar-python/）
 pub const DEFAULT_SIDECAR_CMD: &str = "python3 sidecar-python/sidecar.py";
 
-/// 安装包内置 sidecar exe 文件名（externalBin 约定：名称-target-triple）。
-/// Windows NSIS 安装后与主程序同目录；triple 用编译期常量而非 rustc 探测
-/// （打包机与安装机 triple 一致——MSVC x64 发布目标固定）。
+/// 安装包内置 sidecar exe 文件名候选（externalBin 双名探测）。
+/// - 构建态名（带 target-triple）：`binaries/wxauto-sidecar` 源文件约定
+/// - 安装态名（不带 triple）：tauri-bundler `copy_binaries` 会把
+///   `-{target}` 后缀去掉——NSIS 装完后实际是 `wxauto-sidecar.exe`。
+///   （首版只探测带 triple 名 → 装机后探测不中，回退 python3 在无 Python
+///   的员工机上 9009 死循环——2026-09-03 真机日志定位）
 #[cfg(windows)]
-pub const BUNDLED_SIDECAR_NAME: &str = "wxauto-sidecar-x86_64-pc-windows-msvc.exe";
+pub const BUNDLED_SIDECAR_NAMES: [&str; 2] = [
+    "wxauto-sidecar-x86_64-pc-windows-msvc.exe",
+    "wxauto-sidecar.exe",
+];
 #[cfg(not(windows))]
-pub const BUNDLED_SIDECAR_NAME: &str = "wxauto-sidecar";
+pub const BUNDLED_SIDECAR_NAMES: [&str; 2] = [
+    "wxauto-sidecar-x86_64-unknown-linux-gnu",
+    "wxauto-sidecar",
+];
 
-/// exe 同目录探测内置 sidecar（安装态）：命中返回绝对路径。
+/// exe 同目录探测内置 sidecar（安装态）：按候选名依次找，命中返回绝对路径。
 /// 开发态（target/debug 等目录）无此文件 → None 走回退链。
 pub fn find_bundled_sidecar() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    let candidate = dir.join(BUNDLED_SIDECAR_NAME);
-    candidate.is_file().then(|| candidate.to_string_lossy().into_owned())
+    BUNDLED_SIDECAR_NAMES
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// 解析 sidecar 启动命令字符串 → (program, args)。
@@ -189,7 +201,7 @@ mod tests {
         assert_eq!(prog, "my sidecar.py");
     }
 
-    /// bundled 探测：当前测试环境（开发态）必不命中；文件名常量跨平台有值
+    /// bundled 探测：当前测试环境（开发态）必不命中；候选名含安装态名（无 triple）
     #[test]
     fn test_find_bundled_sidecar_dev_env_miss() {
         // 开发态 exe 在 src-tauri/target/** 下，同目录无 bundled exe
@@ -198,7 +210,31 @@ mod tests {
             // 若命中（异常布局），至少应是存在的绝对路径文件
             assert!(std::path::Path::new(&path).is_file(), "命中路径必须存在: {path}");
         }
-        // 常量非空（编译期保证各平台有定义）
-        assert!(!BUNDLED_SIDECAR_NAME.is_empty());
+        // 候选必须覆盖安装态名（tauri-bundler 去 triple 后的产物）
+        #[cfg(windows)]
+        assert!(BUNDLED_SIDECAR_NAMES.contains(&"wxauto-sidecar.exe"));
+        #[cfg(not(windows))]
+        assert!(BUNDLED_SIDECAR_NAMES.contains(&"wxauto-sidecar"));
+    }
+
+    /// 探测命中路径：在临时目录放一个候选名文件，以它为 exe 目录验证命中。
+    /// 用安装态名（不带 triple）——装机布局的真实场景。
+    #[test]
+    fn test_find_bundled_sidecar_hits_installed_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let name = "wxauto-sidecar.exe";
+        #[cfg(not(windows))]
+        let name = "wxauto-sidecar";
+        std::fs::write(tmp.path().join(name), b"stub").expect("write stub");
+        // 造一个假 exe 放同目录：find 用 current_exe 的父目录，
+        // 这里直接把逻辑抽出来测——通过传参形式不可行（函数用 current_exe），
+        // 改为在临时目录内以子进程跑不现实；退而验证候选序与拼接逻辑：
+        let exe_dir = tmp.path();
+        let hit = BUNDLED_SIDECAR_NAMES
+            .iter()
+            .map(|n| exe_dir.join(n))
+            .find(|p| p.is_file());
+        assert!(hit.is_some(), "安装态名候选应命中");
     }
 }
