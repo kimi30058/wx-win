@@ -1,0 +1,5 @@
+# 构建产物（cargo）
+/target/
+
+# tauri 构建期生成（capabilities 校验中间产物，随构建重生成）
+/gen/schemas/

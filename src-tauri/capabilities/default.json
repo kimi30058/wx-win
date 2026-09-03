@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口默认能力：自定义 invoke 命令 + 事件订阅（core:default 含 event/window/app 基础权限）",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

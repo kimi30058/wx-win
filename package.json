@@ -1,0 +1,25 @@
+{
+  "name": "wxauto-desktop-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "pinia": "^2",
+    "tdesign-icons-vue-next": "^0.4.2",
+    "tdesign-vue-next": "^1.18.0",
+    "vue": "^3.5.27"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@vitejs/plugin-vue": "^5",
+    "typescript": "^5",
+    "vite": "^7",
+    "vue-tsc": "^2"
+  }
+}

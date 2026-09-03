@@ -1,0 +1,191 @@
+================================================================================
+WxAuto 桌面 App（desktop/）Windows 安装环境 + 打包 + 测试 流程与指令
+================================================================================
+适用对象: 在员工 Windows 电脑上部署「WxAuto 微信自动化桌面 App」的运维/开发人员
+对应代码: desktop/（Tauri 2 + Rust + Vue3 + Python sidecar）
+对应服务端: Server/src/modules/gateway/channels/wxauto-ws/（WS 网关, 端口 60021）
+写成日期: 2026-09-02（基于 master 分支当前状态; externalBin 打包链尚未实现, 见 §6 已知缺口）
+
+
+================================================================================
+§1 环境清单（打包机 = Windows 真机, 一台机器全搞定）
+================================================================================
+
+[必须] 打包/运行基础
+  - Windows 10/11, 屏幕缩放 100%（wxautox4 UI 自动化对缩放敏感）
+  - Rust（MSVC 工具链）: https://rustup.rs
+      安装后确认: rustc --version && cargo --version
+  - Visual Studio Build Tools（C++ 桌面开发负载, 提供 link.exe）
+      Rust MSVC 工具链链接器依赖它, 缺失则 cargo build 报 "link.exe not found"
+  - Node.js ≥ 18 + pnpm:      npm install -g pnpm
+  - WebView2 Runtime（Win11 自带; Win10 去 Microsoft 官网装 Evergreen 版）
+  - Git
+
+[必须] 微信自动化运行时（真机验收才需要; 仅打包可跳过）
+  - 微信 PC 版 4.1.9 ~ 4.1.13.12, 且已登录目标账号
+  - Python 3.10+（加到 PATH）
+  - wxautox4 ≥ 41.1.1 商业授权（pip 能装, 无授权 check_license() 不过）
+
+[服务端前置]（不由本机承担, 但打包前须就绪）
+  - NestJS 服务端已部署, WS 网关端口（默认 60021）从本机可达
+  - 服务端 env: WXAUTO_TOOLS_ENABLED=true（16 个 wxauto_* 工具灰度开关, 默认关）
+  - 同机多租户共存时服务端须显式配不同 WXAUTO_WS_PORT（详见 Server/.env.example）
+
+
+================================================================================
+§2 拉代码 + 装依赖（打包机一次性准备）
+================================================================================
+
+:: 1. 拉仓库（或从内部 Git 拿）
+git clone <仓库地址> lyagent
+cd lyagent\desktop
+
+:: 2. 前端依赖
+pnpm install
+
+:: 3. 补装 tauri CLI —— ⚠ package.json 目前没有 @tauri-apps/cli, 必须先补:
+pnpm add -D @tauri-apps/cli
+
+:: 4. Rust 依赖首次编译（顺带验证工具链完整, 首次约 5~10 分钟）
+cd src-tauri
+cargo check
+cd ..
+
+:: 5. Python sidecar 依赖（wxautox4 需授权, 未购买时装不上/跑不了真实模式）
+pip install -r sidecar-python\requirements.txt
+
+
+================================================================================
+§3 打包前检查清单（⚠ 三项已知缺口, 打包前人工处理）
+================================================================================
+
+[ ] ① CSP 为 null —— desktop/src-tauri/tauri.conf.json 里 "csp": null
+      打包分发前必须设置真实 CSP（终审 follow-up 第 5 条）, 示例:
+      "csp": "default-src 'self'; connect-src 'self' ws://*:* wss://*:*; img-src 'self' data:"
+      （connect-src 须放行 WS 网关地址, 否则前端连不上）
+
+[ ] ② externalBin 为空 —— Python sidecar 不会进安装包（Plan 3 未实现）
+      打出的安装包只有壳。装完后必须按 §6 手工接 sidecar
+
+[ ] ③ WXAUTO_SIDECAR_CMD 按空格拆分 —— 含空格的路径会被拆坏（待修 shlex）
+      绕行: 把 sidecar 相关文件放到「不含空格」的路径, 如 C:\wxauto\
+
+
+================================================================================
+§4 开发态联调（不打包, 直接跑起来看效果）
+================================================================================
+
+:: PowerShell 设置环境变量（真实模式, 不带 WXAUTO_MOCK）
+$env:WXAUTO_SERVER_URL   = "ws://<服务端IP>:60021"
+$env:WXAUTO_DEVICE_TOKEN = "<设备token, 见 §7>"
+$env:WXAUTO_SIDECAR_CMD  = "python C:\full\path\to\lyagent\desktop\sidecar-python\sidecar.py"
+
+:: 起开发模式（自动起 vite dev + cargo run, 弹出 GUI 窗口）
+cd desktop
+pnpm tauri dev
+
+:: 冒烟自检: GUI 里「总览」应显示已连上服务端; 触发一次发消息走通全链路
+
+
+================================================================================
+§5 正式打包 → NSIS 安装包
+================================================================================
+
+cd desktop
+
+:: 打包（自动执行 beforeBuildCommand: pnpm build + cargo build --release）
+pnpm tauri build
+
+:: 产物位置:
+::   安装包   src-tauri\target\release\bundle\nsis\WxAutoDesktop_0.1.0_x64-setup.exe
+::   裸 exe   src-tauri\target\release\wxauto-desktop.exe
+
+:: 验证安装: 双击 setup.exe 装完后开始菜单/桌面出现「WxAutoDesktop」
+
+
+================================================================================
+§6 装机后接线（每台员工机一次; 因 §3-② sidecar 未内置）
+================================================================================
+
+1) 装 Python 3.10+ 并放一份仓库的 sidecar-python\ 目录到本机（如 C:\wxauto\sidecar-python\）
+   pip install -r C:\wxauto\sidecar-python\requirements.txt
+
+2) 系统环境变量（cmd 管理员 setx, 或图形界面「编辑系统环境变量」）:
+   setx WXAUTO_SIDECAR_CMD "python C:\wxauto\sidecar-python\sidecar.py"
+   :: ⚠ 路径不能含空格（§3-③）; python 须在 PATH
+
+3) 登录微信 PC 版（4.1.9~4.1.13.12）, 保持前台已登录
+
+4) 启动 WxAutoDesktop:
+   - 「设置」页填服务器地址 ws://<服务端IP>:60021, 粘贴设备 token（§7）, 保存
+   - token 存 Windows 凭据管理器（keyring）, 不落明文文件
+   - 勾选自动连接则重启 App 即自动连网关
+
+5) 验证闭环: 服务端管理页向该设备发一条 get_my_info 指令, App「日志」页
+   应出现指令执行记录且返回 wxid
+
+
+================================================================================
+§7 设备 token 签发（服务端管理操作, 先于装机）
+================================================================================
+
+管理端登录后调:
+  POST /channels/wxauto/<channelId>/device-token
+  （需 channels.write 权限; 渠道必须已存在且 platform=wxauto）
+返回一次性明文 token + expiresIn（固定 365d, 当前不可配、无吊销）:
+  { "data": { "token": "eyJ...", "expiresIn": "365d" } }
+把 token 复制给桌面 App「设置」页。泄漏只能轮换服务端 JWT_SECRET。
+
+
+================================================================================
+§8 测试分层（Windows 上按需执行）
+================================================================================
+
+[A] 单元测试（可选, 与平台无关, Linux 已验证 71+68 全绿）
+    cd desktop\src-tauri && cargo test
+    cd desktop\sidecar-python && python -m pytest test_methods.py
+
+[B] 真实模式链路测试（装机后, 真微信 + 授权 wxautox4）:
+    1. wxautox4 授权自检（Python 直测, 与 App 无关）:
+       python -c "from wxautox4.utils.useful import check_license; print(check_license())"
+       期望 True; False 先解决授权
+    2. sidecar 单独起, 手发一条 JSON-RPC 验证:
+       echo {"id":1,"method":"wx.init","params":{}} | python sidecar-python\sidecar.py
+       期望 stdout 返回 {"id":1,"result":{...}} 且微信窗口被接管
+    3. App 全链路: §6 第 5 步
+
+[C] 真机验收（P5）—— 完整清单见:
+    docs/superpowers/plans/2026-09-01-wxauto-cleanup-acceptance.md (Task 4)
+    逐项勾选 + 附证据（截图/日志）, 回填验收报告
+
+
+================================================================================
+§9 已知问题 / follow-up 摘要（真机验收前须评估）
+================================================================================
+
+  1. Busy/Degraded 两状态无驱动者（mark_busy/mark_online 生产零调用, 六态虚设）
+  2. WXAUTO_SIDECAR_CMD 空格拆分 bug（待改 shlex; §3-③ 绕行）
+  3. isAt 恒 false（sidecar 通知缺 is_at 字段）
+  4. moments.publish 未过 was_send_success 判定
+  5. CSP null（§3-①, 打包前必改）
+  6. search_chat / get_chat_history / 回调外 quote_reply 三个能力待真机验证
+     （spec §2.3 标注, 参考项目未完全证实）
+  7. embeddable python 打包链（externalBin）属 Plan 3, 未实现——即 §6 手工接线的根源
+  完整 12 条见 .superpowers ledger 与 memory/wxauto-desktop-app-impl.md
+
+
+================================================================================
+§10 常见故障速查
+================================================================================
+
+  cargo build 报 link.exe 不存在      → 没装 VS Build Tools, 装「C++ 桌面开发」
+  pnpm tauri dev 白屏/连不上 WS      → CSP connect-src 没放行网关地址; 或服务端
+                                        WXAUTO_WS_PORT 改过端口, App 设置页同步改
+  App 启动即报 sidecar 失败           → WXAUTO_SIDECAR_CMD 路径含空格/不在 PATH/
+                                        python 缺 wxautox4 依赖
+  wx.init 返回授权失败                → wxautox4 未授权或授权机器不符, 先跑 §8-B-1
+  连上网关但指令全部超时              → 服务端指令超时 60s 无并发上限, 批量慢指令
+                                        会拖死后段; 设备端是串行队列, 属已知行为
+  装完双击没反应                      → 看 %USERPROFILE%\.wxauto-desktop\ 日志;
+                                        WebView2 未装（Win10 老版本）
+================================================================================

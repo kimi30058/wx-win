@@ -1,0 +1,18 @@
+# 前端依赖与构建产物
+node_modules/
+dist/
+
+# Rust 构建产物（src-tauri/.gitignore 亦忽略 /target/）
+src-tauri/target/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 本机环境
+.env
+.env.local
+
+# 日志
+*.log

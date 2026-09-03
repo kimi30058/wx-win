@@ -1,0 +1,28 @@
+# WxAuto 桌面 App Rust 编排核心（暂不引入 tauri 依赖——Task 9 再装配 GUI，核心库先行可测）
+[package]
+name = "wxauto-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "WxAuto 微信自动化桌面 App 核心"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+rand = "0.8"
+dirs = "6"
+# token 持久化：Windows Credential Manager / macOS Keychain / Linux Secret Service
+# （Linux 无 dbus keyring 环境时调用报错，由 config.rs 优雅降级为 Err 返回）
+keyring = "3"
+tauri = { version = "2.11.5", features = ["test"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+tauri-build = "2"
