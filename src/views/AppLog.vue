@@ -71,11 +71,13 @@ const SOURCE_OPTIONS = [
   { label: 'sidecar', value: 'sidecar' },
 ];
 
-const visible = computed(() => filterAppLog(store.appLog, filter));
+/** store 头插（新在前）→ 渲染层反转为旧在前新在后，贴底 = 追新（console 经典行为） */
+const visible = computed(() => filterAppLog(store.appLog, filter).slice().reverse());
 
-/** 新日志到达且未暂停时贴底（watch 数组引用变化） */
+/** 新日志到达且未暂停时贴底：watch .length（头插 unshift 不改数组引用，按引用
+ * 比较的 getter watch 在实时流上永不触发；length 变化则 unshift/快照/clear 全覆盖） */
 watch(
-  () => store.appLog,
+  () => store.appLog.length,
   () => {
     if (paused.value) return;
     void nextTick(() => {
