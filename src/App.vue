@@ -15,6 +15,9 @@
         <t-menu-item value="commands">
           <template #icon><t-icon name="terminal" /></template>指令日志
         </t-menu-item>
+        <t-menu-item value="applog">
+          <template #icon><t-icon name="file-paste" /></template>运行日志
+        </t-menu-item>
         <t-menu-item value="moments">
           <template #icon><t-icon name="image" /></template>朋友圈
         </t-menu-item>
@@ -36,6 +39,7 @@
         <Messages v-else-if="view === 'messages'" />
         <ListenView v-else-if="view === 'listen'" />
         <CommandLog v-else-if="view === 'commands'" />
+        <AppLogView v-else-if="view === 'applog'" />
         <Moments v-else-if="view === 'moments'" />
         <Settings v-else />
       </t-content>
@@ -55,6 +59,7 @@ import Overview from './views/Overview.vue';
 import Messages from './views/Messages.vue';
 import ListenView from './views/Listen.vue';
 import CommandLog from './views/CommandLog.vue';
+import AppLogView from './views/AppLog.vue';
 import Moments from './views/Moments.vue';
 import Settings from './views/Settings.vue';
 

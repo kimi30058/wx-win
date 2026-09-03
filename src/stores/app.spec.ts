@@ -23,4 +23,12 @@ describe('appLog', () => {
     store.pushAppLog({ ts: 1, level: 'warn', source: 'sidecar', message: 'x' });
     expect(store.appLog[0]).toEqual({ ts: 1, level: 'warn', source: 'sidecar', message: 'x' });
   });
+
+  it('pushAppLog 守卫：非法级别/来源回退 info/rust', () => {
+    setActivePinia(createPinia());
+    const store = useAppStore();
+    store.pushAppLog({ ts: 1, level: 'fatal', source: 'ghost', message: 'x' });
+    expect(store.appLog[0].level).toBe('info');
+    expect(store.appLog[0].source).toBe('rust');
+  });
 });
