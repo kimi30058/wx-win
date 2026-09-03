@@ -4,7 +4,7 @@ WxAuto 桌面 App（desktop/）Windows 安装环境 + 打包 + 测试 流程与�
 适用对象: 在员工 Windows 电脑上部署「WxAuto 微信自动化桌面 App」的运维/开发人员
 对应代码: desktop/（Tauri 2 + Rust + Vue3 + Python sidecar）
 对应服务端: Server/src/modules/gateway/channels/wxauto-ws/（WS 网关, 端口 60021）
-写成日期: 2026-09-02（基于 master 分支当前状态; externalBin 打包链尚未实现, 见 §6 已知缺口）
+写成日期: 2026-09-02（2026-09-03 更新: sidecar 已内置安装包, §3 三缺口闭合, 见 §6/§9）
 
 
 ================================================================================
@@ -56,19 +56,18 @@ pip install -r sidecar-python\requirements.txt
 
 
 ================================================================================
-§3 打包前检查清单（⚠ 三项已知缺口, 打包前人工处理）
+§3 打包前检查清单（2026-09-03 起三项缺口已全部闭合）
 ================================================================================
 
-[ ] ① CSP 为 null —— desktop/src-tauri/tauri.conf.json 里 "csp": null
-      打包分发前必须设置真实 CSP（终审 follow-up 第 5 条）, 示例:
-      "csp": "default-src 'self'; connect-src 'self' ws://*:* wss://*:*; img-src 'self' data:"
-      （connect-src 须放行 WS 网关地址, 否则前端连不上）
+[x] ① CSP 已设置 —— tauri.conf.json 含真实 CSP（含 style-src unsafe-inline
+      防 TDesign 内联样式白屏; connect-src 已放行 WS 网关）
 
-[ ] ② externalBin 为空 —— Python sidecar 不会进安装包（Plan 3 未实现）
-      打出的安装包只有壳。装完后必须按 §6 手工接 sidecar
+[x] ② externalBin 已实现 —— Python sidecar 经 PyInstaller 冻结为
+      wxauto-sidecar-x86_64-pc-windows-msvc.exe 并打入 NSIS 安装包
+      （安装后与主程序同目录, Rust spawn 自动探测, 免装 Python/pip/wxautox4）
 
-[ ] ③ WXAUTO_SIDECAR_CMD 按空格拆分 —— 含空格的路径会被拆坏（待修 shlex）
-      绕行: 把 sidecar 相关文件放到「不含空格」的路径, 如 C:\wxauto\
+[x] ③ WXAUTO_SIDECAR_CMD 空格拆分已修 —— 引号语义解析
+      （"C:\Program Files\x\sidecar.exe" 不再拆坏）
 
 
 ================================================================================
@@ -104,24 +103,22 @@ pnpm tauri build
 
 
 ================================================================================
-§6 装机后接线（每台员工机一次; 因 §3-② sidecar 未内置）
+§6 装机后接线（2026-09-03 起 sidecar 已内置, 免装 Python/pip）
 ================================================================================
 
-1) 装 Python 3.10+ 并放一份仓库的 sidecar-python\ 目录到本机（如 C:\wxauto\sidecar-python\）
-   pip install -r C:\wxauto\sidecar-python\requirements.txt
+1) sidecar 已冻结进安装包（安装目录下 wxauto-sidecar-x86_64-pc-windows-msvc.exe）,
+   Rust 启动时自动探测 exe 同目录的内置 sidecar —— 无须装 Python、
+   无须 pip install wxautox4、无须设 WXAUTO_SIDECAR_CMD。
+   （开发态仍可用 WXAUTO_SIDECAR_CMD 覆盖; 现支持含空格路径, 引号包裹即可）
 
-2) 系统环境变量（cmd 管理员 setx, 或图形界面「编辑系统环境变量」）:
-   setx WXAUTO_SIDECAR_CMD "python C:\wxauto\sidecar-python\sidecar.py"
-   :: ⚠ 路径不能含空格（§3-③）; python 须在 PATH
+2) 登录微信 PC 版（4.1.9~4.1.13.12）, 保持前台已登录
 
-3) 登录微信 PC 版（4.1.9~4.1.13.12）, 保持前台已登录
-
-4) 启动 WxAutoDesktop:
+3) 启动 WxAutoDesktop:
    - 「设置」页填服务器地址 ws://<服务端IP>:60021, 粘贴设备 token（§7）, 保存
    - token 存 Windows 凭据管理器（keyring）, 不落明文文件
    - 勾选自动连接则重启 App 即自动连网关
 
-5) 验证闭环: 服务端管理页向该设备发一条 get_my_info 指令, App「日志」页
+4) 验证闭环: 服务端管理页向该设备发一条 get_my_info 指令, App「日志」页
    应出现指令执行记录且返回 wxid
 
 
@@ -164,13 +161,16 @@ pnpm tauri build
 ================================================================================
 
   1. Busy/Degraded 两状态无驱动者（mark_busy/mark_online 生产零调用, 六态虚设）
-  2. WXAUTO_SIDECAR_CMD 空格拆分 bug（待改 shlex; §3-③ 绕行）
+  2. [已修 2026-09-03] WXAUTO_SIDECAR_CMD 空格拆分 bug → 引号语义解析
   3. isAt 恒 false（sidecar 通知缺 is_at 字段）
   4. moments.publish 未过 was_send_success 判定
-  5. CSP null（§3-①, 打包前必改）
+  5. [已修 2026-09-03] CSP null → 已设真实 CSP（含 style-src unsafe-inline）
   6. search_chat / get_chat_history / 回调外 quote_reply 三个能力待真机验证
      （spec §2.3 标注, 参考项目未完全证实）
-  7. embeddable python 打包链（externalBin）属 Plan 3, 未实现——即 §6 手工接线的根源
+  7. [已修 2026-09-03] sidecar 内置打包链（PyInstaller+externalBin）实现,
+     安装包自带 sidecar, §6 手工接线作废
+  8. PyInstaller one-file 模式启动稍慢（自解压到 temp, 约 1~3s）——
+     换 onedir 可提速但分发变目录, 当前取舍保持 one-file
   完整 12 条见 .superpowers ledger 与 memory/wxauto-desktop-app-impl.md
 
 
@@ -181,8 +181,9 @@ pnpm tauri build
   cargo build 报 link.exe 不存在      → 没装 VS Build Tools, 装「C++ 桌面开发」
   pnpm tauri dev 白屏/连不上 WS      → CSP connect-src 没放行网关地址; 或服务端
                                         WXAUTO_WS_PORT 改过端口, App 设置页同步改
-  App 启动即报 sidecar 失败           → WXAUTO_SIDECAR_CMD 路径含空格/不在 PATH/
-                                        python 缺 wxautox4 依赖
+  App 启动即报 sidecar 失败           → 安装目录缺 wxauto-sidecar-*.exe（被杀软
+                                        隔离/安装包不完整）; 开发态则查
+                                        WXAUTO_SIDECAR_CMD 指向与 python 依赖
   wx.init 返回授权失败                → wxautox4 未授权或授权机器不符, 先跑 §8-B-1
   连上网关但指令全部超时              → 服务端指令超时 60s 无并发上限, 批量慢指令
                                         会拖死后段; 设备端是串行队列, 属已知行为
