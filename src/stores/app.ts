@@ -10,9 +10,10 @@
  * - `wxauto://status`   payload { wsConnected: boolean; wxOnline: boolean }
  * - `wxauto://message`  payload MessageItem
  * - `wxauto://command-log` payload CommandLogItem
+ * - `wxauto://app-log`  payload AppLogItem（运行日志，1000 环形）
  *
  * invoke 契约：get_config / save_config / get_listen_names / add_listen /
- * remove_listen / manual_execute / connect / disconnect。
+ * remove_listen / manual_execute / connect / disconnect / get_recent_logs / clear_logs。
  * 注意 manual_execute 在 Rust 侧是 `Result<Value, String>`——业务载荷 resolve、
  * 失败字符串 reject（无 {success} 包装帧），故本 store 的 manualExecute 返回
  * 判别联合 ManualOutcome，视图按 ok 分支处理。
@@ -60,6 +61,39 @@ export interface CommandLogItem {
   error?: string;
   durationMs: number;
   ts: number;
+}
+
+/** 运行日志级别（Rust AppLogLevel serde 小写变体名一一对应） */
+export type AppLogLevelName = 'error' | 'warn' | 'info' | 'debug' | 'trace';
+
+/** 运行日志来源：rust=应用自身 / sidecar=Python 子进程 stderr */
+export type AppLogSourceName = 'rust' | 'sidecar';
+
+/** 运行日志条（wxauto://app-log 载荷） */
+export interface AppLogItem {
+  ts: number;
+  level: AppLogLevelName;
+  source: AppLogSourceName;
+  message: string;
+}
+
+/** 运行日志环形上限（Rust LogRing 同容量——spec §5） */
+export const APP_LOG_RING_LIMIT = 1000;
+
+const APP_LOG_LEVELS: AppLogLevelName[] = ['error', 'warn', 'info', 'debug', 'trace'];
+const APP_LOG_SOURCES: AppLogSourceName[] = ['rust', 'sidecar'];
+
+/** 运行日志载荷守卫：级别/来源非法回退 info/rust（单条脏数据不炸日志流） */
+function parseAppLogItem(v: unknown): AppLogItem {
+  const r = isRecord(v) ? v : {};
+  const level = str(r.level) as AppLogLevelName;
+  const source = str(r.source) as AppLogSourceName;
+  return {
+    ts: num(r.ts) || Date.now(),
+    level: APP_LOG_LEVELS.includes(level) ? level : 'info',
+    source: APP_LOG_SOURCES.includes(source) ? source : 'rust',
+    message: str(r.message),
+  };
 }
 
 /** 设备配置（get_config 返回的业务字段子集；token 只写不读——keyring 侧不回传） */
@@ -177,6 +211,8 @@ export const useAppStore = defineStore('app', {
     messages: [] as MessageItem[],
     /** 指令日志（同上环形） */
     commandLog: [] as CommandLogItem[],
+    /** 运行日志（新条目头插；1000 环形） */
+    appLog: [] as AppLogItem[],
     /** 监听名单（昵称列表） */
     listenNames: [] as string[],
     /** 设备配置（init 拉取；null=未加载） */
@@ -224,6 +260,11 @@ export const useAppStore = defineStore('app', {
             this.pushCommandLog(parseCommandLogItem(e.payload));
           }),
         );
+        unlisteners.push(
+          await listen<unknown>('wxauto://app-log', (e) => {
+            this.pushAppLog(e.payload);
+          }),
+        );
         // 桌面 App 生命周期 = 窗口生命周期，无需 unlisten；保留引用便于未来热重载清理
         void unlisteners;
         this.config = parseAppConfig(await invoke<unknown>('get_config'));
@@ -234,6 +275,18 @@ export const useAppStore = defineStore('app', {
         // 状态灯落到真值的唯一兜底路径。
         const snap = await invoke<unknown>('get_app_state');
         if (isAppStateName(snap)) this.appState = snap;
+        // 运行日志历史补齐（bridge attach 前的条目事件无重放——快照兜底）
+        const logs = await invoke<unknown>('get_recent_logs');
+        if (Array.isArray(logs)) {
+          // 快照旧在前 → 头插后新在前；先整体置空防重复（init 幂等只跑一次）
+          this.appLog = logs
+            .map(parseAppLogItem)
+            .reverse()
+            .concat(this.appLog);
+          if (this.appLog.length > APP_LOG_RING_LIMIT) {
+            this.appLog.length = APP_LOG_RING_LIMIT;
+          }
+        }
       } catch (err) {
         this.initError = err instanceof Error ? err.message : String(err);
       }
@@ -253,6 +306,16 @@ export const useAppStore = defineStore('app', {
     pushCommandLog(item: CommandLogItem) {
       this.commandLog.unshift(item);
       if (this.commandLog.length > RING_LIMIT) this.commandLog.length = RING_LIMIT;
+    },
+    /** 运行日志入列：载荷归一 + 头插 + 1000 环形 */
+    pushAppLog(payload: unknown) {
+      this.appLog.unshift(parseAppLogItem(payload));
+      if (this.appLog.length > APP_LOG_RING_LIMIT) this.appLog.length = APP_LOG_RING_LIMIT;
+    },
+    /** 清空运行日志（Rust ring + 本地双清） */
+    async clearAppLog() {
+      await invoke('clear_logs');
+      this.appLog = [];
     },
     /** 保存配置（token 非空时随配置提交 → Rust 写 keyring），成功后回读刷新 */
     async saveConfig(c: SaveConfigInput) {
