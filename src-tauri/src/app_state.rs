@@ -103,12 +103,14 @@ pub type LinkSlot = Arc<std::sync::RwLock<Option<Arc<AgentLink>>>>;
 
 /// LinkSlot 读守卫中毒恢复（必修 3）：panic 不级联——数据结构本身完好
 fn slot_read(slot: &LinkSlot) -> std::sync::RwLockReadGuard<'_, Option<Arc<AgentLink>>> {
-    slot.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+    slot.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// LinkSlot 写守卫中毒恢复（同上）
 fn slot_write(slot: &LinkSlot) -> std::sync::RwLockWriteGuard<'_, Option<Arc<AgentLink>>> {
-    slot.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+    slot.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// 装配完成后的运行件集合（AppStateCtx.inner 的 Ok 载荷）
@@ -325,7 +327,7 @@ impl AppStateCtx {
                 let log_tx = self.log_tx.clone();
                 let stderr_sink: std::sync::Arc<dyn wxauto_desktop::sidecar::StderrSink> =
                     std::sync::Arc::new(crate::ui_log::RingStderrSink::new(log_ring, log_tx));
-                let sidecar = SidecarHandle::spawn_default_sunk(Some(stderr_sink))
+                let sidecar = SidecarHandle::spawn_default_sunk(Some(stderr_sink.clone()))
                     .await
                     .map_err(|e| format!("sidecar 启动失败: {e}"))?;
                 let sidecar = Arc::new(Mutex::new(sidecar));
@@ -350,13 +352,25 @@ impl AppStateCtx {
                 };
                 // 4. Supervisor（event_sink：status 帧 → 注入 ws 快照 → 桥转发。
                 //    I2：Supervisor 的 status 帧无 wsConnected 字段，直接转发
-                //    前端 WS 灯恒灰——经 link 槽读快照注入，与 AgentLink sink 同口径）
+                //    前端 WS 灯恒灰——经 link 槽读快照注入，与 AgentLink sink 同口径。
+                //    I-A（终审）：注入带 sink 的 spawner——重启代 sidecar 的 stderr
+                //    也接管进同一 ring（spec §5「多代 sidecar 各代读循环写同一
+                //    ring」）。若保持 default_spawner，新代 stderr 回 inherit，
+                //    release GUI 无控制台 = 崩溃代日志彻底丢失——恰是最需要
+                //    看日志的场景。sink 在闭包外构造一次、克隆捕获，与首代
+                //    共用同一个 RingStderrSink；CLI（main.rs）不注入，零回归）
                 let link: LinkSlot = Arc::new(std::sync::RwLock::new(None));
                 let supervisor = {
                     let bridge = bridge.clone();
                     let link_slot = link.clone();
+                    let spawner_sink = stderr_sink.clone();
+                    let spawner: wxauto_desktop::state::SidecarSpawner = Arc::new(move || {
+                        let sink = spawner_sink.clone();
+                        Box::pin(async move { SidecarHandle::spawn_default_sunk(Some(sink)).await })
+                    });
                     let sup =
                         Supervisor::new(state_machine.clone(), session.clone(), listeners.clone())
+                            .with_spawner(spawner)
                             .with_event_sink(Box::new(move |frame: Value| {
                                 let bridge = bridge.clone();
                                 // ws 快照在 sink（同步上下文）就地读取注入
@@ -594,17 +608,11 @@ mod tests {
         while !current.ws_connected() && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        assert!(
-            current.ws_connected(),
-            "10s 内应完成连接（断开前灯须曾亮）"
-        );
+        assert!(current.ws_connected(), "10s 内应完成连接（断开前灯须曾亮）");
 
         // 断开 → 桥应补发 wsConnected=false 的 status
         a.stop_link().await.expect("disconnect 应成功");
-        assert!(
-            !current.ws_connected(),
-            "halt 后 ws_connected 应复位 false"
-        );
+        assert!(!current.ws_connected(), "halt 后 ws_connected 应复位 false");
         assert!(slot_read(&a.link).is_none(), "断开后槽应清空");
 
         // 轮询等补发帧到达监听器（终审必修 5：断开路径前端灯灭的数据源）

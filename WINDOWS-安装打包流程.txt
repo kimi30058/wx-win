@@ -198,6 +198,8 @@ pnpm tauri build
 
 - release 构建已加 windows_subsystem=windows：安装态不再出现 cmd 日志窗口；
   排障需日志时看应用内「运行日志」tab（rust+sidecar 双来源，可过滤级别/来源）。
+- release 构建下 --cli 模式亦无控制台输出（windows_subsystem 为链接期属性，
+  与运行参数无关）——CLI 排障请用 debug 构建。
 - debug 构建仍保留控制台（开发排障用）。
 - sidecar stderr 已由 Rust 接管（piped）——不再直通控制台；CREATE_NO_WINDOW
   三条 spawn 路径齐备，任何路径不再闪黑窗。

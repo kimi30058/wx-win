@@ -60,6 +60,62 @@ async fn test_stderr_lines_reach_injected_sink() {
     handle.shutdown().await;
 }
 
+/// I-B 回归：Windows GBK locale 下 Python stderr 写非 UTF-8 字节，
+/// 读循环须以 lossy 容忍（InvalidData 不再整循环退出）且继续存活——
+/// 否则无人读管道，缓冲写满后 sidecar 写 stderr 阻塞假死。
+#[tokio::test]
+async fn test_stderr_reader_survives_non_utf8_bytes() {
+    struct VecSink(Mutex<Vec<String>>);
+    impl StderrSink for VecSink {
+        fn consume(&self, line: String) {
+            self.0.lock().unwrap().push(line);
+        }
+    }
+    const SCRIPT: &str = r#"
+import sys, json, time
+sys.stderr.buffer.write("中文GBK行".encode("gbk") + b"\n")
+sys.stderr.buffer.flush()
+time.sleep(0.2)
+print("ascii after gbk", file=sys.stderr, flush=True)
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    req = json.loads(line)
+    print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": {"ok": True}}), flush=True)
+"#;
+    let sink = Arc::new(VecSink(Mutex::new(Vec::new())));
+    let mut handle = SidecarHandle::spawn_with_python_sunk(SCRIPT, &[], Some(sink.clone()))
+        .await
+        .expect("spawn 失败");
+    let resp = handle
+        .call("wx.get_my_info", serde_json::json!({}))
+        .await
+        .expect("RPC 失败");
+    assert_eq!(resp["ok"], true);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let n = sink.0.lock().unwrap().len();
+        if n >= 2 || std::time::Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let lines = sink.0.lock().unwrap().clone();
+    assert!(
+        lines
+            .iter()
+            .any(|l| !l.is_empty() && l.contains("ascii after gbk")),
+        "GBK 行后循环必须存活并收到后续 ASCII 行: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains('\u{FFFD}') || l.contains("GBK")),
+        "GBK 字节经 lossy 转换应到达（替换符或可辨认片段）: {lines:?}"
+    );
+    handle.shutdown().await;
+}
+
 #[tokio::test]
 async fn test_spawn_without_sink_still_works() {
     // 未注入 sink：stderr inherit（原行为），RPC 正常

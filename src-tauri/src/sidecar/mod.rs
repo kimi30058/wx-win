@@ -402,15 +402,20 @@ fn spawn_reader(shared: Arc<Shared>, stdout: tokio::process::ChildStdout) {
 
 /// sidecar stderr 读循环：逐行消费进 sink；EOF/IO 错退出（sidecar 死亡
 /// 时管道关闭，reaper 负责回收，此处只管读）。空行跳过。
+/// I-B：按字节读 + lossy 解码——Windows GBK locale 下 Python stderr 会写
+/// 非 UTF-8 字节，`read_line(&mut String)` 遇之报 InvalidData 整循环退出，
+/// 无人读管道 → 缓冲写满后 sidecar 写 stderr 阻塞假死；故必须 read_until
+/// + `String::from_utf8_lossy`（替换符兜底），循环不因编码问题退出。
 fn spawn_stderr_reader(sink: Arc<dyn StderrSink>, stderr: tokio::process::ChildStderr) {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
-        let mut line = String::new();
+        let mut buf: Vec<u8> = Vec::new();
         loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
                 Ok(0) => break,
                 Ok(_) => {
+                    let line = String::from_utf8_lossy(&buf);
                     let trimmed = line.trim_end();
                     if !trimmed.is_empty() {
                         sink.consume(trimmed.to_string());

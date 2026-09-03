@@ -278,7 +278,9 @@ export const useAppStore = defineStore('app', {
         // 运行日志历史补齐（bridge attach 前的条目事件无重放——快照兜底）
         const logs = await invoke<unknown>('get_recent_logs');
         if (Array.isArray(logs)) {
-          // 快照旧在前 → 头插后新在前；先整体置空防重复（init 幂等只跑一次）
+          // 快照旧在前 → reverse 后新在前，与本地已收条目 concat（不置空：
+          // invoke 窗口期 app-log 事件可能已 push 部分同源条目，快照与本地
+          // 短暂重叠属预期，由下方环形截断吸收；init 幂等只跑一次不会重复叠加）
           this.appLog = logs
             .map(parseAppLogItem)
             .reverse()
