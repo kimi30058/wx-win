@@ -57,7 +57,7 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .with_ansi(std::io::stderr().is_terminal())
                 .with_writer(std::io::stderr),
         )
-        .with(UiLogLayer::new(ring.clone(), log_tx))
+        .with(UiLogLayer::new(ring.clone(), log_tx.clone()))
         .with(env_filter)
         .init();
 
@@ -82,7 +82,13 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             //    类型键严格一致（C1：StateManager 按 TypeId 匹配，多包一层
             //    Arc 即全量 invoke「state not managed」）。
             let bridge = UiEventBridge::new();
-            let ctx = AppStateCtx::shell(default_config_path(), bridge.clone(), ring.clone());
+            let ctx = AppStateCtx::shell(
+                default_config_path(),
+                bridge.clone(),
+                ring.clone(),
+                // I-1：sidecar stderr sink 共用同一 mpsc（日志 tab 实时双来源）
+                Some(log_tx),
+            );
             // 装配任务持克隆（AppStateCtx: Clone——内部全 Arc 槽位，浅克隆
             // 共享同一 OnceCell/bridge；manage 侧仍是裸值，类型键不变）
             let ctx_for_setup = ctx.clone();
@@ -201,6 +207,7 @@ mod tests {
             default_config_path(),
             UiEventBridge::new(),
             crate::ui_log::LogRing::new(10),
+            None,
         );
         app.manage(ctx);
 
@@ -265,8 +272,8 @@ mod tests {
             source: AppLogSource::Sidecar,
             message: "后".into(),
         });
-        // 与生产 setup 相同的 manage 形态（shell 增 log_ring 参数后）
-        let ctx = AppStateCtx::shell(default_config_path(), UiEventBridge::new(), ring);
+        // 与生产 setup 相同的 manage 形态（shell 增 log_ring/log_tx 参数后）
+        let ctx = AppStateCtx::shell(default_config_path(), UiEventBridge::new(), ring, None);
         app.manage(ctx);
 
         let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())

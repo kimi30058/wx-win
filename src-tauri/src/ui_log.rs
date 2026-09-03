@@ -2,9 +2,9 @@
 //! stderr 读循环。GUI 的「运行日志」tab 数据源；CLI 模式完全不装配本模块
 //! 的捕获链（stderr 仍 inherit，行为零回归）。
 //!
-//! 本模块在 bin 目标下，`pub` 项不会被外部链接引用；`as_str` 与
-//! `Debug/Trace` 变体的消费方在 Task 3/4 才接入（项级 `#[allow(dead_code)]`
-//! 精确放行）。
+//! 本模块在 bin 目标下，`pub` 项不会被外部链接引用；现状仅剩两个
+//! `as_str`（AppLogLevel/AppLogSource 各一）仍空闲，项级
+//! `#[allow(dead_code)]` 放行。
 //!
 //! 设计（spec 2026-09-03）：
 //! - LogRing：Mutex<VecDeque>，上限淘汰最旧；snapshot 旧在前
@@ -184,11 +184,22 @@ where
     }
 }
 
-/// sidecar stderr → ring 的 sink 实现（含关键字升 error 判定，spec §4：
-/// Python 侧无级别概念，统一 info；含 ERROR/Traceback 关键字升 error）。
-/// 消费接线在 Task 4（gui.rs 注入 spawn_default_sunk）——项级放行
-/// dead_code，届时移除。
-pub struct RingStderrSink(pub LogRing);
+/// sidecar stderr → ring + mpsc 的 sink 实现（含关键字升 error 判定，
+/// spec §4：Python 侧无级别概念，统一 info；含 ERROR/Traceback 关键字升
+/// error）。mpsc 是实时事件流数据源（I-1：前端 `wxauto://app-log` 只消费
+/// mpsc 转发出的条目，ring 仅供 get_recent_logs 快照）；tx=None（CLI/
+/// 测试装配）时只落 ring。
+pub struct RingStderrSink {
+    ring: LogRing,
+    tx: Option<tokio::sync::mpsc::Sender<AppLogEntry>>,
+}
+
+impl RingStderrSink {
+    /// 构造：ring 必填；tx 传 GUI 装配的实时通道（无则 None）
+    pub fn new(ring: LogRing, tx: Option<tokio::sync::mpsc::Sender<AppLogEntry>>) -> Self {
+        Self { ring, tx }
+    }
+}
 
 impl wxauto_desktop::sidecar::StderrSink for RingStderrSink {
     fn consume(&self, line: String) {
@@ -197,12 +208,17 @@ impl wxauto_desktop::sidecar::StderrSink for RingStderrSink {
         } else {
             AppLogLevel::Info
         };
-        self.0.push(AppLogEntry {
+        let entry = AppLogEntry {
             ts: now_ms(),
             level,
             source: AppLogSource::Sidecar,
             message: line,
-        });
+        };
+        self.ring.push(entry.clone());
+        if let Some(tx) = &self.tx {
+            // 满则丢行不反压（旁路观察者——与 UiLogLayer 同语义）
+            let _ = tx.try_send(entry);
+        }
     }
 }
 
@@ -342,10 +358,32 @@ mod tests {
         assert_eq!(j["message"], "boom");
     }
 
+    /// I-1 修复防回归：sidecar stderr 行也走 mpsc（实时事件流数据源）
+    #[test]
+    fn test_ring_stderr_sink_forwards_to_mpsc_when_present() {
+        let ring = LogRing::new(10);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let sink = RingStderrSink::new(ring.clone(), Some(tx));
+        wxauto_desktop::sidecar::StderrSink::consume(&sink, "sidecar 行".into());
+        let got = rx.blocking_recv().expect("应收到转发");
+        assert_eq!(got.message, "sidecar 行");
+        assert_eq!(got.source, AppLogSource::Sidecar);
+        assert_eq!(ring.snapshot().len(), 1, "ring 同时落条");
+    }
+
+    /// tx=None（CLI/测试装配）时 consume 只落 ring 不 panic
+    #[test]
+    fn test_ring_stderr_sink_none_tx_ring_only() {
+        let ring = LogRing::new(10);
+        let sink = RingStderrSink::new(ring.clone(), None);
+        wxauto_desktop::sidecar::StderrSink::consume(&sink, "x".into());
+        assert_eq!(ring.snapshot().len(), 1);
+    }
+
     #[test]
     fn test_ring_stderr_sink_promotes_traceback_to_error() {
         let ring = LogRing::new(10);
-        let sink = RingStderrSink(ring.clone());
+        let sink = RingStderrSink::new(ring.clone(), None);
         wxauto_desktop::sidecar::StderrSink::consume(&sink, "普通行".into());
         wxauto_desktop::sidecar::StderrSink::consume(
             &sink,
