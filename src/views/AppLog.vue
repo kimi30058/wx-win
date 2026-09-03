@@ -22,8 +22,8 @@
     </div>
     <div ref="scrollRef" class="logbox" @scroll="onScroll">
       <div
-        v-for="(item, i) in visible"
-        :key="`${item.ts}-${i}`"
+        v-for="item in visible"
+        :key="`${item.ts}-${item.message}`"
         class="logline"
         :class="`logline--${item.level}`"
       >
@@ -74,10 +74,12 @@ const SOURCE_OPTIONS = [
 /** store 头插（新在前）→ 渲染层反转为旧在前新在后，贴底 = 追新（console 经典行为） */
 const visible = computed(() => filterAppLog(store.appLog, filter).slice().reverse());
 
-/** 新日志到达且未暂停时贴底：watch .length（头插 unshift 不改数组引用，按引用
- * 比较的 getter watch 在实时流上永不触发；length 变化则 unshift/快照/clear 全覆盖） */
+/** 新日志到达且未暂停时贴底：watch 首元素引用 store.appLog[0]。pushAppLog 每次
+ * 都生成 parseAppLogItem 新对象并头插，下标 0 引用恒变；清空/快照替换同样换首
+ * 元素。不用 .length：环形满载后 push 是 unshift(1000→1001) 紧跟截断回 1000，
+ * flush:'pre' 微任务时 length 已还原 → 新旧值相等不触发，长会话稳态贴底死。 */
 watch(
-  () => store.appLog.length,
+  () => store.appLog[0],
   () => {
     if (paused.value) return;
     void nextTick(() => {
