@@ -118,7 +118,11 @@ pnpm tauri build
    - token 存 Windows 凭据管理器（keyring）, 不落明文文件
    - 勾选自动连接则重启 App 即自动连网关
 
-4) 验证闭环: 服务端管理页向该设备发一条 get_my_info 指令, App「日志」页
+4) 激活: 首次启动若提示「wxautox4 未激活」, 在左侧「激活」页输入运营发放的
+   激活码（一机一码）→ 立即激活; 激活成功自动初始化, 若提示微信未开,
+   打开微信 PC 客户端后在同页点「重新初始化」
+
+5) 验证闭环: 服务端管理页向该设备发一条 get_my_info 指令, App「日志」页
    应出现指令执行记录且返回 wxid
 
 
@@ -179,6 +183,8 @@ pnpm tauri build
 ================================================================================
 
   cargo build 报 link.exe 不存在      → 没装 VS Build Tools, 装「C++ 桌面开发」
+  激活失败: 激活码无效或已过期        → 核对码与设备（一机一码）; 仍失败看运行日志
+                                        tab 的 sidecar 行
   pnpm tauri dev 白屏/连不上 WS      → CSP connect-src 没放行网关地址; 或服务端
                                         WXAUTO_WS_PORT 改过端口, App 设置页同步改
   App 启动即报 sidecar 失败           → 安装目录缺 wxauto-sidecar-*.exe（被杀软

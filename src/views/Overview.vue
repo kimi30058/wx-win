@@ -1,6 +1,6 @@
 <template>
   <div class="overview">
-    <!-- 三指示灯：sidecar / WS / 微信（spec §3.4 概览行） -->
+    <!-- 四指示灯：sidecar / WS / 微信 / 授权（spec §3.4 概览行） -->
     <t-row :gutter="16">
       <t-col :span="4">
         <t-card title="Sidecar" :bordered="false">
@@ -27,6 +27,29 @@
             <span class="lamp" :class="store.wxOnline === null ? 'lamp--gray' : store.wxOnline ? 'lamp--green' : 'lamp--red'" />
             <span>{{ store.wxOnline === null ? '未知' : store.wxOnline ? '在线' : '离线' }}</span>
           </div>
+        </t-card>
+      </t-col>
+      <t-col :span="4">
+        <t-card title="授权" :bordered="false">
+          <div class="lamp-row">
+            <span
+              class="lamp"
+              :class="store.licensePassed ? 'lamp--green' : store.needsActivation ? 'lamp--red' : store.wechatMissing ? 'lamp--yellow' : 'lamp--gray'"
+            />
+            <span>{{
+              store.licensePassed ? '正常' : store.needsActivation ? '未激活' : store.wechatMissing ? '已激活·微信未开' : '检测中'
+            }}</span>
+          </div>
+          <t-button
+            v-if="store.needsActivation"
+            size="small"
+            theme="danger"
+            variant="outline"
+            style="margin-top: 8px"
+            @click="store.switchView('activation')"
+          >
+            去激活
+          </t-button>
         </t-card>
       </t-col>
     </t-row>
@@ -65,7 +88,7 @@
 
 <script setup lang="ts">
 /**
- * 概览视图：三指示灯（sidecar/WS/微信）+ 运行状态 + 快捷操作（spec §3.4）。
+ * 概览视图：四指示灯（sidecar/WS/微信/授权）+ 运行状态 + 快捷操作（spec §3.4）。
  * 只读消费 store；连接/断开调 store 的 connect/disconnect。
  */
 import { computed, ref } from 'vue';
