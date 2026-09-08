@@ -672,7 +672,11 @@ def test_unknown_method_raises():
 
 
 def test_mock_covers_all_non_init_methods():
-    """MOCK 表必须覆盖除 wx.init 外的全部 19 个方法（Linux CI 全链路依赖）"""
+    """MOCK 表必须覆盖除 wx.init 外的全部 19 个方法（Linux CI 全链路依赖）
+
+    wx.activate 不在此列：它走 dispatch 特判（mock 时直达 _activate 的
+    mock 分支，见 test_activate_mock_mode），不经 _mock_dispatch 查表。
+    """
     methods_list = [
         "wx.get_my_info", "wx.is_online",
         "msg.send", "file.send", "msg.quote", "msg.forward",
@@ -798,3 +802,73 @@ def test_sidecar_writers_serialized_under_lock():
         assert cnt % 2 == 0, (
             f"帧原子性破坏：第 {i} 段线程 {tid} 连续 {cnt} 个 piece（奇数 = 帧被从中间撕开）"
         )
+
+
+# ══════════ wx.activate（激活码认证）══════════
+
+
+def _install_fake_wxautox4(monkeypatch, licensed=True, authenticate_result=True):
+    """伪造 wxautox4 包：sys.modules 预置三模块 + 顶层属性挂接。
+
+    返回 calls 字典记录 authenticate 实参（断言激活码透传）。
+    """
+    import types
+
+    calls = {"authenticate": []}
+
+    def _authenticate(code):
+        calls["authenticate"].append(code)
+        return authenticate_result
+
+    useful = types.ModuleType("wxautox4.utils.useful")
+    useful.check_license = lambda: licensed
+    useful.authenticate = _authenticate
+    utils = types.ModuleType("wxautox4.utils")
+    utils.useful = useful
+    top = types.ModuleType("wxautox4")
+    top.utils = utils
+    top.WeChat = object  # wx.activate 不触 WeChat，占位即可
+    top.WxParam = types.SimpleNamespace()
+
+    monkeypatch.setitem(sys.modules, "wxautox4", top)
+    monkeypatch.setitem(sys.modules, "wxautox4.utils", utils)
+    monkeypatch.setitem(sys.modules, "wxautox4.utils.useful", useful)
+    return calls
+
+
+def test_activate_empty_code_short_circuits():
+    """空码前置拦截：不触 wxautox4 导入即返回失败"""
+    r = _dispatch("wx.activate", {"code": "  "}, None)
+    assert r == {"ok": False, "message": "激活码不能为空"}
+
+
+def test_activate_success_roundtrip(monkeypatch):
+    calls = _install_fake_wxautox4(monkeypatch, licensed=True, authenticate_result=True)
+    r = _dispatch("wx.activate", {"code": " ABC-123 "}, None)
+    assert r["ok"] is True
+    assert calls["authenticate"] == ["ABC-123"]  # strip 后透传
+    # 激活成功 → 立即回查 check_license 确认
+    assert r["message"] == "激活成功"
+
+
+def test_activate_invalid_code(monkeypatch):
+    _install_fake_wxautox4(monkeypatch, licensed=False, authenticate_result=False)
+    r = _dispatch("wx.activate", {"code": "BAD"}, None)
+    assert r["ok"] is False
+    assert "无效" in r["message"]
+
+
+def test_activate_accepted_but_not_effective(monkeypatch):
+    """authenticate 过但回查仍 false：不静默吞（spec 错误表边界条）"""
+    _install_fake_wxautox4(monkeypatch, licensed=False, authenticate_result=True)
+    r = _dispatch("wx.activate", {"code": "X"}, None)
+    assert r["ok"] is False
+    assert "重启应用" in r["message"]
+
+
+def test_activate_mock_mode():
+    """mock 表：MOCK-ACTIVATION 成功、其余失败（Linux CI 全链路依赖）"""
+    ok = _dispatch("wx.activate", {"code": "MOCK-ACTIVATION"}, None, mock=True)
+    assert ok["ok"] is True
+    bad = _dispatch("wx.activate", {"code": "WRONG"}, None, mock=True)
+    assert bad["ok"] is False

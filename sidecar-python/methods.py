@@ -1,4 +1,4 @@
-"""20 个方法 → wxautox4 映射（全部按参考项目已验证用法；MOCK 模式返回假数据）
+"""21 个方法 → wxautox4 映射（全部按参考项目已验证用法；MOCK 模式返回假数据）
 
 铁律：只使用 spec 附录 A 已验证 API；幻觉 API 清单（AddNewFriend / EditFriendInfo /
 GetFriendDetails / GetHistoryMessage / KeepRunning / GetNextNewMessage(callback=) 等）
@@ -155,6 +155,34 @@ def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
         "wxid": getattr(_instance, "wxid", ""),
         "nickname": getattr(_instance, "nickname", ""),
     }
+
+
+def _activate(params, wx, msg_pool, msg_pool_ts, notify, mock):
+    """wx.activate：authenticate(code) 激活 → 立即 check_license() 回查确认
+
+    激活状态由 wxautox4 自持久化（一机一码、跨重启有效），本方法无副作用存储。
+    """
+    code = (params.get("code") or "").strip()
+    if not code:
+        return {"ok": False, "message": "激活码不能为空"}
+    if mock:
+        # mock 分支：MOCK-ACTIVATION 成功、其余失败（Linux CI 全链路依赖）
+        ok = code == "MOCK-ACTIVATION"
+        return {
+            "ok": ok,
+            "message": "模拟激活成功" if ok else "激活失败：激活码无效或已过期",
+        }
+    # 真实导入（仅 Windows + 已 pip install wxautox4 时可达）
+    from wxautox4.utils.useful import authenticate  # noqa: PLC0415 — 延迟导入是硬要求
+
+    if not authenticate(code):
+        return {"ok": False, "message": "激活失败：激活码无效或已过期"}
+    # 回查确认：authenticate 过但状态未生效的极端情况不静默吞
+    from wxautox4.utils.useful import check_license  # noqa: PLC0415
+
+    if not check_license():
+        return {"ok": False, "message": "激活码已接受但授权状态未生效，请重启应用"}
+    return {"ok": True, "message": "激活成功"}
 
 
 def _get_my_info(params, wx, msg_pool, msg_pool_ts, notify, mock):
@@ -471,7 +499,10 @@ def _util_sleep(params, wx, msg_pool, msg_pool_ts, notify, mock):
 
 
 def _mock_dispatch(method, params):
-    """MOCK 表：除 wx.init 外全部 19 方法（wx.init 在 dispatch 的 mock 短路先行处理）"""
+    """MOCK 表：除 wx.init / wx.activate 外全部 19 方法
+
+    （wx.init / wx.activate 需操作授权态，在 dispatch 的 mock 短路先行处理）
+    """
     table = {
         "wx.get_my_info": {"licensed": True, "wxid": "mock_wx", "nickname": "模拟设备", "online": True},
         "wx.is_online": {"online": True},
@@ -507,6 +538,7 @@ def _mock_dispatch(method, params):
 
 _METHODS = {
     "wx.init": _init,
+    "wx.activate": _activate,
     "wx.get_my_info": _get_my_info,
     "wx.is_online": _is_online,
     "msg.send": _msg_send,
@@ -532,9 +564,11 @@ _METHODS = {
 def dispatch(method, params, wx, msg_pool, msg_pool_ts, notify, mock):
     """统一入口：返回 result dict；业务错误抛 SidecarError（→ -32000）
 
-    MOCK 短路优先于方法路由（除 wx.init 需置 mock 实例外全走假数据表）；
-    未知方法统一 SidecarError。
+    MOCK 短路优先于方法路由（wx.init / wx.activate 需操作授权态，
+    特判直达真实函数的 mock 分支）；未知方法统一 SidecarError。
     """
+    if mock and method == "wx.activate":
+        return _activate(params, wx, msg_pool, msg_pool_ts, notify, mock)
     if mock and method != "wx.init":
         return _mock_dispatch(method, params)
     fn = _METHODS.get(method)
