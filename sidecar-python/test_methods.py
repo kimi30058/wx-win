@@ -915,3 +915,21 @@ def test_activate_mock_mode():
     assert ok["ok"] is True
     bad = _dispatch("wx.activate", {"code": "WRONG"}, None, mock=True)
     assert bad["ok"] is False
+
+
+def test_init_mock_unlicensed_injection(monkeypatch):
+    """WXAUTO_MOCK_UNLICENSED=1：mock init 回未授权；激活成功后翻转"""
+    monkeypatch.setenv("WXAUTO_MOCK_UNLICENSED", "1")
+    import importlib
+    importlib.reload(methods)
+    try:
+        r = _dispatch("wx.init", {}, None, mock=True)
+        assert r["licensed"] is False
+        assert r["failReason"] == "licensed"
+        ok = _dispatch("wx.activate", {"code": "MOCK-ACTIVATION"}, None, mock=True)
+        assert ok["ok"] is True
+        r2 = _dispatch("wx.init", {}, None, mock=True)
+        assert r2["licensed"] is True, "激活成功后 init 应翻转为已授权"
+    finally:
+        del os.environ["WXAUTO_MOCK_UNLICENSED"]
+        importlib.reload(methods)

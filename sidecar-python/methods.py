@@ -17,6 +17,7 @@ import sidecar 会加载第二份模块实例，回写落空，真实模式下�
 （msg_id/chat_who/chat_type/attr/msg_type/sender/content），与 Rust 侧
 spec.rs RawMessage 严格对齐；camelCase 的 WS 帧转换在 Rust agent_link 层做。
 """
+import os
 import sys
 import time
 
@@ -29,6 +30,9 @@ class SidecarError(Exception):
 _instance = None
 # 授权状态（_init 真实分支写入；供上层判断是否进就绪态）
 _license_ok = False
+# mock 注入：未授权初始态（集成冒烟用；真实路径不受影响）。
+# wx.activate 成功后翻转（见 _activate mock 分支）
+_MOCK_LICENSE_STATE = os.environ.get("WXAUTO_MOCK_UNLICENSED", "") == "1"
 
 
 def get_wx_instance():
@@ -135,7 +139,12 @@ def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
     """
     global _instance, _license_ok
     if mock:
-        _instance, _license_ok = None, True
+        _instance = None
+        # 未授权注入态：licensed=false + failReason=licensed（激活成功后由
+        # wx.activate 翻转 _MOCK_LICENSE_STATE）
+        _license_ok = not _MOCK_LICENSE_STATE
+        if _MOCK_LICENSE_STATE:
+            return {"licensed": False, "wxid": "", "nickname": "", "failReason": "licensed"}
         return {"licensed": True, "wxid": "mock_wx", "nickname": "模拟设备"}
     # 真实导入（仅 Windows + 已 pip install wxautox4 时可达）
     from wxautox4 import WeChat, WxParam  # noqa: PLC0415 — 延迟导入是硬要求（Linux 无此库）
@@ -178,8 +187,10 @@ def _activate(params, wx, msg_pool, msg_pool_ts, notify, mock):
     if not code:
         return {"ok": False, "message": "激活码不能为空"}
     if mock:
-        # mock 分支：MOCK-ACTIVATION 成功、其余失败（Linux CI 全链路依赖）
+        global _MOCK_LICENSE_STATE
         ok = code == "MOCK-ACTIVATION"
+        if ok:
+            _MOCK_LICENSE_STATE = False  # 激活成功翻转（后续 wx.init 即 licensed）
         return {
             "ok": ok,
             "message": "模拟激活成功" if ok else "激活失败：激活码无效或已过期",

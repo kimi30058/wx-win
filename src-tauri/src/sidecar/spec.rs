@@ -1,11 +1,12 @@
-//! 20 个 sidecar 方法的强类型定义（spec §3.2）
+//! 21 个 sidecar 方法的强类型定义（spec §3.2）
 //! 方法名常量是 call 的第一参；参数用 serde_json::json! 构造后过 XxxParams 序列化。
 //! 完整的参数/结果结构随各 Task 落地补充，本文件先交付方法名常量 + 核心消息结构。
 use serde::{Deserialize, Serialize};
 
-/// 方法名常量（20 个；与 Python sidecar methods.py 一一对应）
+/// 方法名常量（21 个；与 Python sidecar methods.py 一一对应）
 pub mod methods {
     pub const INIT: &str = "wx.init";
+    pub const ACTIVATE: &str = "wx.activate";
     pub const GET_MY_INFO: &str = "wx.get_my_info";
     pub const IS_ONLINE: &str = "wx.is_online";
     pub const MSG_SEND: &str = "msg.send";
@@ -33,6 +34,11 @@ pub struct InitResult {
     pub licensed: bool,
     pub wxid: String,
     pub nickname: String,
+    /// 失败三态（sidecar Task 2 契约）：licensed=未授权 / wechat_missing=微信未开；
+    /// 旧 sidecar 二进制无此字段——default None 向后兼容。
+    /// rename 对齐 Python 侧 camelCase（serde 默认蛇形会错位成 fail_reason）
+    #[serde(default, rename = "failReason")]
+    pub fail_reason: Option<String>,
 }
 
 /// message.received 通知 / chat.history 结果中的原始消息结构（spec §3.2 RawMessage）
@@ -55,6 +61,7 @@ mod tests {
     #[test]
     fn test_method_constants() {
         assert_eq!(methods::INIT, "wx.init");
+        assert_eq!(methods::ACTIVATE, "wx.activate");
         assert_eq!(methods::GET_MY_INFO, "wx.get_my_info");
         assert_eq!(methods::IS_ONLINE, "wx.is_online");
         assert_eq!(methods::MSG_SEND, "msg.send");

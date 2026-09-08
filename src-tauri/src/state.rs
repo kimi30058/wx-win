@@ -342,16 +342,30 @@ impl Supervisor {
         }
     }
 
-    /// init 序列：wx.init（licensed → WxInit）→ resync 监听 → Ready + status 事件。
-    /// 未授权 / init 报错：留在 Booting（面板显示授权引导）。
+    /// init 序列：wx.init（licensed 且无 failReason → WxInit）→ resync 监听 → Ready + status 事件。
+    /// 未授权 / 微信未开 / init 报错：留在 Booting；Ok 且带原因时发 init_fail 帧
+    /// 引导前端（RPC 失败不发——那是 sidecar 死亡，归 Supervisor 重启域）。
     async fn init_sequence(&self) {
-        let licensed = self
-            .direct_wx_init()
-            .await
-            .map(|v| v["licensed"].as_bool().unwrap_or(false))
+        let init = self.direct_wx_init().await.ok();
+        let licensed = init
+            .as_ref()
+            .and_then(|v| v["licensed"].as_bool())
             .unwrap_or(false);
-        if !licensed {
-            tracing::warn!("wx.init 未授权或失败，保持 Booting（等待授权引导）");
+        let fail_reason = init
+            .as_ref()
+            .and_then(|v| v["failReason"].as_str())
+            .map(str::to_string);
+        if !licensed || fail_reason.is_some() {
+            // 未授权缺 failReason（旧 sidecar）也归一为 licensed——引导口径一致
+            let reason = fail_reason.unwrap_or_else(|| "licensed".to_string());
+            tracing::warn!(%reason, "wx.init 未就绪，保持 Booting（等待授权/微信引导）");
+            if init.is_some() {
+                self.emit(serde_json::json!({
+                    "kind": "event", "type": "init_fail",
+                    "data": {"reason": reason},
+                }))
+                .await;
+            }
             return;
         }
         self.state.mark_wx_init(true).await;
@@ -368,6 +382,13 @@ impl Supervisor {
         let n = self.listeners.list().await.len();
         self.emit(crate::agent_link::inbound::status_event(online, n, true))
             .await;
+    }
+
+    /// 手动重跑 init 序列（激活成功后 activate_license 命令 / 前端「重新初始化」
+    /// 按钮入口）。与 run 循环内 init_sequence 同一段逻辑，幂等可重入；
+    /// 不借道崩溃重启循环——init 失败时 sidecar 进程还活着。
+    pub async fn retry_init(&self) {
+        self.init_sequence().await;
     }
 
     /// 直连 sidecar 调 wx.init（绕过 session 串行队列与 16-action 白名单——
