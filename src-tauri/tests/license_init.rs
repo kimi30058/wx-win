@@ -59,6 +59,20 @@ for line in sys.stdin:
     print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": out}), flush=True)
 "#;
 
+/// RPC 错误帧剧本：wx.init 回 -32603（复现 wxautox4 依赖缺失形态）
+const INIT_ERROR_SCRIPT: &str = r#"
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    req = json.loads(line)
+    if req.get("method") == "wx.init":
+        err = {"code": -32603, "message": "ModuleNotFoundError: No module named 'requests'"}
+        print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "error": err}), flush=True)
+    else:
+        print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": {"ok": True}}), flush=True)
+"#;
+
 /// 装配剧本 sidecar + Supervisor（event_sink 收集帧；不跑 run 循环，
 /// 直接驱动 retry_init——确定性无退避时序干扰）
 async fn make_supervisor(
@@ -188,5 +202,62 @@ sys.stdin.read()
         sup.last_init_fail().await,
         None,
         "RPC 失败（init.is_none()）不得写 last_init_fail——sidecar 死亡归重启域"
+    );
+}
+
+/// RPC 错误帧（sidecar 活着、wx 层报错）必须进 init_fail 引导链路：
+/// 写 last_init_fail 快照 + 发 init_fail 帧——修复前被 .ok() 静默吞掉，
+/// 前端永远 Booting 无原因（ADR-0011）
+#[tokio::test]
+async fn rpc_error_frame_writes_snapshot_and_emits_init_fail() {
+    let (sup, state, events) = make_supervisor(INIT_ERROR_SCRIPT).await;
+    sup.retry_init().await;
+    assert_eq!(
+        state.state().await,
+        AppState::SidecarBooting,
+        "init 报错保持 Booting"
+    );
+    let snap = sup.last_init_fail().await;
+    assert!(
+        snap.as_deref()
+            .unwrap_or("")
+            .contains("ModuleNotFoundError"),
+        "快照应含真实错误, 实得: {snap:?}"
+    );
+    assert!(
+        snap.as_deref().unwrap_or("").starts_with("初始化失败："),
+        "格式约定前缀"
+    );
+    let frames = events.lock().unwrap();
+    let hit = frames.iter().any(|f| {
+        f["type"] == "init_fail"
+            && f["data"]["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("ModuleNotFoundError")
+    });
+    assert!(hit, "应收 init_fail 帧含错误详情, 实收: {frames:?}");
+}
+
+/// transport 级失败（进程死/Closed）不写快照——不谎报授权失败，归重启域
+#[tokio::test]
+async fn transport_failure_keeps_snapshot_empty() {
+    // 起一个秒退的 sidecar：spawn 成功即 exit → RPC 走 Closed
+    let script = r#"
+import sys
+sys.stdin.readline()
+"#;
+    let handle = SidecarHandle::spawn_with_python(script, &[])
+        .await
+        .expect("spawn 失败");
+    let session = Arc::new(WxSession::new(Arc::new(Mutex::new(handle))));
+    let listeners = Arc::new(ListenerRegistry::new(session.clone()));
+    let state = Arc::new(AppStateMachine::new());
+    let sup = Supervisor::new(state.clone(), session, listeners);
+    sup.retry_init().await;
+    assert_eq!(
+        sup.last_init_fail().await,
+        None,
+        "transport 失败不得写授权失败快照"
     );
 }

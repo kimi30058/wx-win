@@ -230,7 +230,8 @@ pub struct Supervisor {
     /// 最近一次 init 失败原因快照（I1：init_fail 事件先于前端 listen 注册
     /// 发出即永久丢失——tauri 事件无重放且每 sidecar 世代只发一次，前端
     /// init 经 get_init_fail_reason 命令拉本缓存兜底；成功路径推进 WxInit
-    /// 前清 None）。RPC 失败不写（sidecar 死亡归重启域，不谎报授权失败）。
+    /// 前清 None）。RPC 错误帧（Sidecar 变体）也写——sidecar 活着、wx 层
+    /// 可诊断（ADR-0011）；transport 级失败不写。
     last_init_fail: RwLock<Option<String>>,
     /// 诊断：当前所处阶段（测试 / 排障插桩用）
     phase: RwLock<&'static str>,
@@ -302,7 +303,9 @@ impl Supervisor {
             let uptime = tokio::time::Instant::now() - spawned_at;
             let lived_long_enough = uptime >= SIDECAR_MIN_UPTIME;
             match SidecarHandle::await_exit(&mut exit_rx).await {
-                Some(status) => tracing::warn!(?status, failures, ?uptime, "sidecar 退出，准备退避重启"),
+                Some(status) => {
+                    tracing::warn!(?status, failures, ?uptime, "sidecar 退出，准备退避重启")
+                }
                 None => {
                     // 观察通道意外关闭（理论上 reaper 不死；防御性退出避免忙转）
                     tracing::error!("sidecar 退出观察通道关闭，Supervisor 停止");
@@ -356,9 +359,27 @@ impl Supervisor {
 
     /// init 序列：wx.init（licensed 且无 failReason → WxInit）→ resync 监听 → Ready + status 事件。
     /// 未授权 / 微信未开 / init 报错：留在 Booting；Ok 且带原因时发 init_fail 帧
-    /// 引导前端（RPC 失败不发——那是 sidecar 死亡，归 Supervisor 重启域）。
+    /// 引导前端（transport 级 RPC 失败不发——那是 sidecar 死亡，归 Supervisor 重启域）。
     async fn init_sequence(&self) {
-        let init = self.direct_wx_init().await.ok();
+        let init = match self.direct_wx_init().await {
+            Ok(v) => Some(v),
+            Err(RpcError::Sidecar(msg)) => {
+                // ADR-0011：RPC 错误帧 = sidecar 活着、wx 层报错（依赖缺失/
+                // 导入失败），是可诊断问题——进 init_fail 引导链路，激活页
+                // 显示真实原因。区别于 transport 级失败（下分支）。
+                let reason = format!("初始化失败：sidecar 错误: {msg}");
+                tracing::warn!(%reason, "wx.init RPC 错误帧");
+                *self.last_init_fail.write().await = Some(reason.clone());
+                self.emit(serde_json::json!({
+                    "kind": "event", "type": "init_fail",
+                    "data": {"reason": reason},
+                }))
+                .await;
+                return;
+            }
+            Err(_) => None, // Timeout/Io/Closed = transport 级（sidecar 死/卡），
+                            // 归 Supervisor 重启域——不写快照不谎报授权失败
+        };
         let licensed = init
             .as_ref()
             .and_then(|v| v["licensed"].as_bool())
