@@ -11,9 +11,11 @@
  * - `wxauto://message`  payload MessageItem
  * - `wxauto://command-log` payload CommandLogItem
  * - `wxauto://app-log`  payload AppLogItem（运行日志，1000 环形）
+ * - `wxauto://init-fail` payload { reason: 'licensed'|'wechat_missing' }
  *
  * invoke 契约：get_config / save_config / get_listen_names / add_listen /
- * remove_listen / manual_execute / connect / disconnect / get_recent_logs / clear_logs。
+ * remove_listen / manual_execute / connect / disconnect / get_recent_logs /
+ * clear_logs / activate_license / retry_init。
  * 注意 manual_execute 在 Rust 侧是 `Result<Value, String>`——业务载荷 resolve、
  * 失败字符串 reject（无 {success} 包装帧），故本 store 的 manualExecute 返回
  * 判别联合 ManualOutcome，视图按 ok 分支处理。
@@ -30,6 +32,28 @@ export type AppStateName =
   | 'Ready'
   | 'Busy'
   | 'Degraded';
+
+/** init 未就绪原因（Rust wxauto://init-fail 载荷；''=无） */
+export type InitFailReasonName = '' | 'licensed' | 'wechat_missing';
+
+/** 已过授权判据态（进入即视为 license 通过） */
+const LICENSE_PASSED_STATES: AppStateName[] = ['WxInit', 'Ready', 'Busy', 'Degraded'];
+
+/** 已知 init 失败原因（未知值守卫忽略——防 sidecar 异常值污染 UI） */
+const KNOWN_INIT_FAIL_REASONS: string[] = ['licensed', 'wechat_missing'];
+
+/** 激活结果判别联合（Rust activate_license 的 resolve/reject 归一） */
+export interface ActivationOutcome {
+  ok: boolean;
+  message: string;
+}
+
+/** init-fail 载荷守卫 */
+function isInitFailPayload(v: unknown): v is { reason: string } {
+  if (typeof v !== 'object' || v === null) return false;
+  const reason = (v as { reason?: unknown }).reason;
+  return typeof reason === 'string';
+}
 
 /** 六态中文标签（概览指示灯 / 状态条展示） */
 export const APP_STATE_LABELS: Record<AppStateName, string> = {
@@ -199,6 +223,10 @@ export const useAppStore = defineStore('app', {
   state: () => ({
     /** 应用六态（wxauto://state 最后值；初始按状态机构造值 SidecarBooting） */
     appState: 'SidecarBooting' as AppStateName,
+    /** 当前视图（跨视图导航归 store：Overview 去激活/Activation 回概览） */
+    activeView: 'overview',
+    /** init 未就绪原因（wxauto://init-fail 最后值；''=无） */
+    initFailReason: '' as InitFailReasonName,
     /** WS 连接态：null=尚未收到状态帧（灰色「未知」） */
     wsConnected: null as boolean | null,
     /** 微信在线态：null=尚未收到状态帧 */
@@ -226,6 +254,18 @@ export const useAppStore = defineStore('app', {
     sidecarBooting(state): boolean {
       return state.appState === 'SidecarBooting';
     },
+    /** 需要激活：Booting 且未授权（横幅+自动跳激活页判据） */
+    needsActivation(state): boolean {
+      return state.appState === 'SidecarBooting' && state.initFailReason === 'licensed';
+    },
+    /** 已激活但微信未开（重新初始化按钮判据；不自动跳激活页） */
+    wechatMissing(state): boolean {
+      return state.appState === 'SidecarBooting' && state.initFailReason === 'wechat_missing';
+    },
+    /** 授权已通过（状态进入 WxInit 及之后） */
+    licensePassed(state): boolean {
+      return LICENSE_PASSED_STATES.includes(state.appState);
+    },
   },
   actions: {
     /**
@@ -239,7 +279,17 @@ export const useAppStore = defineStore('app', {
         const unlisteners: UnlistenFn[] = [];
         unlisteners.push(
           await listen<unknown>('wxauto://state', (e) => {
-            if (isAppStateName(e.payload)) this.appState = e.payload;
+            if (isAppStateName(e.payload)) {
+              this.appState = e.payload;
+              if (LICENSE_PASSED_STATES.includes(e.payload)) this.initFailReason = '';
+            }
+          }),
+        );
+        unlisteners.push(
+          await listen<unknown>('wxauto://init-fail', (e) => {
+            if (isInitFailPayload(e.payload) && KNOWN_INIT_FAIL_REASONS.includes(e.payload.reason)) {
+              this.initFailReason = e.payload.reason as InitFailReasonName;
+            }
           }),
         );
         unlisteners.push(
@@ -353,6 +403,27 @@ export const useAppStore = defineStore('app', {
     /** 断开服务端连接 */
     async disconnect() {
       await invoke('disconnect');
+    },
+    /** 跨视图导航（Overview 去激活 / Activation 回概览） */
+    switchView(v: string) {
+      this.activeView = v;
+    },
+    /** 激活 wxautox4（Rust 成功即内联重试 init；结果经 state/init-fail 事件回流 UI） */
+    async activateLicense(code: string): Promise<ActivationOutcome> {
+      try {
+        const r = await invoke<unknown>('activate_license', { code });
+        const ok = (r as { ok?: unknown } | null)?.ok === true;
+        const message = typeof (r as { message?: unknown } | null)?.message === 'string'
+          ? (r as { message: string }).message
+          : '';
+        return { ok, message };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    },
+    /** 手动重跑 init 序列（激活页「重新初始化」按钮） */
+    async retryInit() {
+      await invoke('retry_init');
     },
   },
 });
