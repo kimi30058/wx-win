@@ -144,7 +144,10 @@ async fn last_init_fail_caches_unlicensed_reason() {
 async fn last_init_fail_caches_wechat_missing_reason() {
     let (sup, _state, _events) = make_supervisor(WECHAT_MISSING_SCRIPT).await;
     sup.retry_init().await;
-    assert_eq!(sup.last_init_fail().await.as_deref(), Some("wechat_missing"));
+    assert_eq!(
+        sup.last_init_fail().await.as_deref(),
+        Some("wechat_missing")
+    );
 }
 
 /// 成功路径清缓存：授权通过推进 WxInit 前 last_init_fail 置 None——

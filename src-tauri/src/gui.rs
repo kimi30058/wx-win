@@ -254,7 +254,8 @@ mod tests {
 
     /// get_recent_logs 命令：ring 有两条时快照返回（旧在前）
     #[tokio::test]
-    async fn test_invoke_get_recent_logs_returns_snapshot() {        use crate::ui_log::{AppLogEntry, AppLogLevel, AppLogSource, LogRing};
+    async fn test_invoke_get_recent_logs_returns_snapshot() {
+        use crate::ui_log::{AppLogEntry, AppLogLevel, AppLogSource, LogRing};
 
         let app = tauri::test::mock_builder()
             .invoke_handler(tauri::generate_handler![get_recent_logs])

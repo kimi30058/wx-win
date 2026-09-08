@@ -104,9 +104,7 @@ pub fn get_app_state(ctx: State<'_, AppStateCtx>) -> String {
 /// Err 分支仅为满足 tauri「async command 带引用参数须返回 Result」约束，
 /// 实际不产生（装配失败回 Ok(None)——授权失败快照与装配失败是两域）。
 #[tauri::command]
-pub async fn get_init_fail_reason(
-    ctx: State<'_, AppStateCtx>,
-) -> Result<Option<String>, String> {
+pub async fn get_init_fail_reason(ctx: State<'_, AppStateCtx>) -> Result<Option<String>, String> {
     match ctx.ready().await {
         Ok(a) => Ok(a.supervisor.last_init_fail().await),
         Err(_) => Ok(None),
