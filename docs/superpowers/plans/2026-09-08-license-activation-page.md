@@ -149,6 +149,8 @@ cd sidecar-python && python3 -m pytest test_methods.py -k activate -v
 ```
 预期：`test_activate_empty_code_short_circuits` 等以 `SidecarError: 未知或未实现的方法: wx.activate` 失败。
 
+注意：`test_mock_covers_all_non_init_methods` 的 methods_list **不加** `wx.activate`（本任务即把它做成 dispatch 特判路径，不走 mock 表）。
+
 - [ ] **Step 3: 最小实现**
 
 `methods.py` 的 `_init` 定义之后新增：
@@ -175,13 +177,34 @@ def _activate(params, wx, msg_pool, msg_pool_ts, notify, mock):
     return {"ok": True, "message": "激活成功"}
 ```
 
-`_mock_dispatch` 的 `table` 字典加一行（表内 params 可用，沿用 `chat.search` 的写法）：
+`_mock_dispatch` **不加** `wx.activate` 条目——mock 路径走 `dispatch` 特判（wx.activate 需读写模块级授权态，查表做不到；Task 3 Step 1b 会在该特判上加未授权注入）。`sidecar.py` 的 `dispatch` 包装层不动，`methods.py` 的 `dispatch` 函数改为：
 
 ```python
-        "wx.activate": {
-            "ok": params.get("code") == "MOCK-ACTIVATION",
-            "message": "模拟激活成功" if params.get("code") == "MOCK-ACTIVATION" else "激活失败：激活码无效或已过期",
-        },
+def dispatch(method, params, wx, msg_pool, msg_pool_ts, notify, mock):
+    """统一入口：返回 result dict；业务错误抛 SidecarError（→ -32000）
+
+    MOCK 短路优先于方法路由（wx.init / wx.activate 需操作授权态，
+    特判直达真实函数的 mock 分支）；未知方法统一 SidecarError。
+    """
+    if mock and method == "wx.activate":
+        return _activate(params, wx, msg_pool, msg_pool_ts, notify, mock)
+    if mock and method != "wx.init":
+        return _mock_dispatch(method, params)
+    fn = _METHODS.get(method)
+    if fn is None:
+        raise SidecarError(f"未知或未实现的方法: {method}")
+    return fn(params, wx, msg_pool, msg_pool_ts, notify, mock)
+```
+
+`_activate` 的 mock 分支（函数体最前、空码检查之后）：
+
+```python
+    if mock:
+        ok = code == "MOCK-ACTIVATION"
+        return {
+            "ok": ok,
+            "message": "模拟激活成功" if ok else "激活失败：激活码无效或已过期",
+        }
 ```
 
 `_METHODS` 字典加：`"wx.activate": _activate,`（紧跟 `"wx.init": _init,` 之后）。
@@ -411,7 +434,7 @@ async fn make_supervisor(script: &str) -> (Arc<Supervisor>, Arc<AppStateMachine>
         .expect("spawn 失败");
     let session = Arc::new(WxSession::new(Arc::new(Mutex::new(handle))));
     let listeners = Arc::new(ListenerRegistry::new(session.clone()));
-    let state = Arc::new(AppStateMachine::new().await);
+    let state = Arc::new(AppStateMachine::new());
     let events: Arc<StdMutex<Vec<Value>>> = Arc::new(StdMutex::new(Vec::new()));
     let ev = events.clone();
     let sup = Supervisor::new(state.clone(), session, listeners)
@@ -454,7 +477,75 @@ async fn ready_script_retry_init_reaches_ready() {
 }
 ```
 
-（若 `AppStateMachine::new()` 无 `.await`——按编译器提示去掉；它是同步构造。）
+（若 `AppStateMachine::new()` 签名与上不符——以编译器为准修正；它是同步构造（state.rs:67），不带 `.await`。）
+
+- [ ] **Step 1b: mock 未授权注入（集成冒烟前置）**
+
+spec 集成冒烟要求 `WXAUTO_MOCK=1` 下走通「未激活跳转 → 输入 mock 码 → 进 WxInit」，但 mock `wx.init` 恒 licensed=true 驱动不了未激活分支。给 mock 加环境变量注入（仅 mock 路径生效，真实路径零影响）：
+
+`methods.py` 模块级（`_license_ok = False` 附近）加：
+
+```python
+# mock 注入：未授权初始态（集成冒烟用；真实路径不受影响）。
+# wx.activate 成功后翻转（见 _activate mock 分支）
+_MOCK_LICENSE_STATE = os.environ.get("WXAUTO_MOCK_UNLICENSED", "") == "1"
+```
+
+（文件头部 import 区补 `import os`。）
+
+`_init` mock 分支改为：
+
+```python
+    if mock:
+        _instance = None
+        # 未授权注入态：licensed=false + failReason=licensed（激活成功后由
+        # wx.activate 翻转 _MOCK_LICENSE_STATE）
+        _license_ok = not _MOCK_LICENSE_STATE
+        if _MOCK_LICENSE_STATE:
+            return {"licensed": False, "wxid": "", "nickname": "", "failReason": "licensed"}
+        return {"licensed": True, "wxid": "mock_wx", "nickname": "模拟设备"}
+```
+
+（`_license_ok` 需 `global` 声明——mock 分支已在函数头 `global _instance, _license_ok` 覆盖。`_MOCK_LICENSE_STATE` 模块级读一次即可，翻转走赋值：`_activate` mock 分支成功时执行 `global _MOCK_LICENSE_STATE; _MOCK_LICENSE_STATE = False`——放函数内 global 声明。）
+
+`_activate` mock 分支改为（替换 Task 1 的版本，加状态翻转）：
+
+```python
+    if mock:
+        global _MOCK_LICENSE_STATE
+        ok = code == "MOCK-ACTIVATION"
+        if ok:
+            _MOCK_LICENSE_STATE = False  # 激活成功翻转（后续 wx.init 即 licensed）
+        return {
+            "ok": ok,
+            "message": "模拟激活成功" if ok else "激活失败：激活码无效或已过期",
+        }
+```
+
+注意：Task 1 已把 `wx.activate` 做成 `dispatch` 特判路径（不走 mock 表、不进 `_mock_dispatch`）——本步骤在该特判的 `_activate` mock 分支里加状态翻转即可，不涉及 mock 表改动。
+
+对应补测试（`test_methods.py` 追加）：
+
+```python
+def test_init_mock_unlicensed_injection(monkeypatch):
+    """WXAUTO_MOCK_UNLICENSED=1：mock init 回未授权；激活成功后翻转"""
+    monkeypatch.setenv("WXAUTO_MOCK_UNLICENSED", "1")
+    import importlib
+    importlib.reload(methods)
+    try:
+        r = _dispatch("wx.init", {}, None, mock=True)
+        assert r["licensed"] is False
+        assert r["failReason"] == "licensed"
+        ok = _dispatch("wx.activate", {"code": "MOCK-ACTIVATION"}, None, mock=True)
+        assert ok["ok"] is True
+        r2 = _dispatch("wx.init", {}, None, mock=True)
+        assert r2["licensed"] is True, "激活成功后 init 应翻转为已授权"
+    finally:
+        del os.environ["WXAUTO_MOCK_UNLICENSED"]
+        importlib.reload(methods)
+```
+
+（`_dispatch` 的 mock 直传 `methods.dispatch`——reload 后引用自动生效。）
 
 - [ ] **Step 2: 跑测试确认红**
 
@@ -479,8 +570,9 @@ pub struct InitResult {
     pub wxid: String,
     pub nickname: String,
     /// 失败三态（sidecar Task 2 契约）：licensed=未授权 / wechat_missing=微信未开；
-    /// 旧 sidecar 二进制无此字段——default None 向后兼容
-    #[serde(default)]
+    /// 旧 sidecar 二进制无此字段——default None 向后兼容。
+    /// rename 对齐 Python 侧 camelCase（serde 默认蛇形会错位成 fail_reason）
+    #[serde(default, rename = "failReason")]
     pub fail_reason: Option<String>,
 }
 ```
@@ -1544,6 +1636,10 @@ git commit -m "feat(overview): 授权状态卡+去激活入口; docs: 装机流�
 
 ## 收尾验收（实现完成后）
 
-1. **mock 全链路**（Linux 可跑）：`WXAUTO_MOCK=1` 下 sidecar mock `wx.init` 恒 licensed=true，激活分支不触发——激活链路的自动化验证即上述 pytest/vitest/cargo 三层；真机激活闭环（真实激活码 + 微信 4.1.x）随 Windows 发版流程验收，参照 `WINDOWS-安装打包流程.txt`。
+1. **mock 全链路**（Linux 可跑，依赖 Task 3 Step 1b 的 `WXAUTO_MOCK_UNLICENSED=1` 注入）：
+   ```
+   WXAUTO_MOCK=1 WXAUTO_MOCK_UNLICENSED=1 xvfb-run -a ./src-tauri/target/debug/wxauto-desktop
+   ```
+   预期：GUI 启动 → 自动跳激活页 → 输入 `MOCK-ACTIVATION` → 状态翻转为已授权 → 状态 tag 走「微信初始化中」（mock is_online=true 会到 Ready）。
 2. **真机验收清单**（记入发版 runbook）：未激活冷启动自动跳激活页；错码红字；正确码 → 状态进「微信初始化中」→「正常服务」；杀微信进程重启 App → 横幅「微信客户端未打开」+ 重新初始化按钮生效。
 3. 差距报告 P1 两项（自动更新、托盘常驻+开机自启）不在本计划——各自走独立拷问→spec→计划循环。
