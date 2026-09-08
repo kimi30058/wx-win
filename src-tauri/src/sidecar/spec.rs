@@ -101,4 +101,21 @@ mod tests {
         let back: RawMessage = serde_json::from_value(v).expect("反序列化失败");
         assert_eq!(back.content, "你好");
     }
+
+    /// InitResult failReason 契约：camelCase rename + 缺字段向后兼容（Task 3 I1）
+    #[test]
+    fn test_init_result_fail_reason_serde() {
+        // Python 侧发 camelCase failReason → 解析为 Some
+        let v: InitResult = serde_json::from_value(serde_json::json!({
+            "licensed": false, "wxid": "", "nickname": "", "failReason": "licensed"
+        }))
+        .expect("反序列化失败");
+        assert_eq!(v.fail_reason.as_deref(), Some("licensed"));
+        // 旧 sidecar 无该字段 → None（serde default）
+        let old: InitResult = serde_json::from_value(serde_json::json!({
+            "licensed": true, "wxid": "w", "nickname": "n"
+        }))
+        .expect("旧包反序列化失败");
+        assert_eq!(old.fail_reason, None);
+    }
 }
