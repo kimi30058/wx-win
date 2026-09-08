@@ -28,7 +28,9 @@ pub mod methods {
     pub const UTIL_SLEEP: &str = "util.sleep";
 }
 
-/// wx.init / wx.get_my_info 的结果结构（Task 2 的 Python 侧与此对齐）
+/// wx.init / wx.get_my_info 的结果结构（Task 2 的 Python 侧与此对齐）。
+/// 契约文档类型：生产解析在 state.rs init_sequence 裸 Value 索引
+/// （v["licensed"] / v["failReason"]），本结构体供契约对齐与测试。
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct InitResult {
     pub licensed: bool,

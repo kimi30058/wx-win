@@ -54,10 +54,19 @@ done
 echo "[gui-smoke] mock server pid=$SERVER_PID port=$PORT"
 
 # 2. Xvfb 起 GUI（HOME 隔离 + mock 链路 env）
+#    UNLICENSED 变体（M3）：WXAUTO_GUI_SMOKE_UNLICENSED=1 时给 GUI env 加
+#    WXAUTO_MOCK_UNLICENSED=1——mock init 回未授权三态，激活链路
+#    （init_fail 帧 → 前端授权引导）可冒烟；默认路径行为不变。
 GUI_LOG="$(mktemp /tmp/wxauto-gui-app.XXXXXX.log)"
+UNLICENSED_ENV=()
+if [ "${WXAUTO_GUI_SMOKE_UNLICENSED:-0}" = "1" ]; then
+    UNLICENSED_ENV=(WXAUTO_MOCK_UNLICENSED=1)
+    echo "[gui-smoke] UNLICENSED 变体：mock init 未授权三态"
+fi
 env -i HOME="$SMOKE_HOME" PATH="$PATH" DISPLAY=:99 WXAUTO_MOCK=1 \
     WXAUTO_SERVER_URL="ws://127.0.0.1:$PORT" WXAUTO_DEVICE_TOKEN="$TOKEN" \
     WXAUTO_SIDECAR_CMD="python3 $ROOT/sidecar-python/sidecar.py" RUST_LOG=info \
+    "${UNLICENSED_ENV[@]}" \
     xvfb-run -a "$BIN" >"$GUI_LOG" 2>&1 &
 GUI_PID=$!
 echo "[gui-smoke] GUI pid=$GUI_PID log=$GUI_LOG"
@@ -70,6 +79,25 @@ if ! kill -0 "$GUI_PID" 2>/dev/null; then
     exit 1
 fi
 echo "[gui-smoke] GUI 存活 OK（事件循环 + sidecar 装配通过）"
+
+# 3b. UNLICENSED 变体断言：Supervisor init_sequence 应发出
+#     「wx.init 未就绪 … reason=licensed」warn 日志（state.rs 归一口径）。
+#     未授权时 sidecar 恒 Booting、mock server 收不到 get_my_info 业务闭环，
+#     故本变体在第 4 步会超时——此处只断言未授权口径后即收尾退出。
+if [ "${WXAUTO_GUI_SMOKE_UNLICENSED:-0}" = "1" ]; then
+    if grep -q 'reason=licensed' "$GUI_LOG"; then
+        echo "[gui-smoke] UNLICENSED 断言 OK（init 未就绪 reason=licensed 落日志）"
+    else
+        echo "[gui-smoke] FAIL: UNLICENSED 变体未见 reason=licensed 日志（init_fail 口径回归？）"
+        tail -30 "$GUI_LOG"
+        exit 1
+    fi
+    kill -TERM "$GUI_PID" 2>/dev/null || true
+    sleep 1
+    kill -9 "$GUI_PID" 2>/dev/null || true
+    echo "[gui-smoke] PASS: UNLICENSED 变体（未授权三态 + 授权引导链路日志）"
+    exit 0
+fi
 
 # 4. 等 mock server 自了断（收到 hello→command→result 断言链后退出；上限 60s）
 for _ in $(seq 1 120); do

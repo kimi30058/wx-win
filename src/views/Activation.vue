@@ -98,11 +98,15 @@ async function onActivate({ validateResult }: { validateResult: boolean }) {
   activating.value = false;
 }
 
-/** 手动重新初始化（微信打开后） */
+/** 手动重新初始化（微信打开后）——失败写结果条红字（M1：无 catch 时
+ * invoke reject 变未处理 Promise rejection，用户看不到任何反馈） */
 async function onRetryInit() {
   retrying.value = true;
   try {
     await store.retryInit();
+  } catch (err) {
+    resultOk.value = false;
+    resultMessage.value = `重新初始化失败：${err instanceof Error ? err.message : String(err)}`;
   } finally {
     retrying.value = false;
   }
