@@ -119,11 +119,19 @@ async fn activate_license(code: String) -> Result<ActivationResult, String>
 - 直连 `wx.activate`（复用 direct_call 模式，**30s 超时**——authenticate 可能走网络）
 - 成功（ok=true）→ **内联重发 wx.init 一次**（复用 direct_wx_init 短超时模式；
   不借道 Supervisor 崩溃循环——init 失败时 sidecar 进程还活着）
-- init 重试失败即止，不自动循环（微信没开场景每次白耗 UIA 扫描）；
-  用户打开微信后在激活页点「重新初始化」按钮再试
+- init 重试失败即止，不自动循环（微信没开场景每次白耗 UIA 扫描）
+
+```rust
+#[tauri::command]
+async fn retry_init() -> Result<(), String>
+```
+
+- 独立的重新初始化命令：仅重发 wx.init 一次（供激活页「重新初始化」按钮用——
+  激活成功但微信未开的场景，用户打开微信后手动触发；sidecar 活着时 Supervisor
+  不会重跑 init 序列，必须有显式入口）
 - **不新增 get_license_status 命令**——前端从既有 state 事件 + get_app_state
   快照推导 licensed，避免两套真相
-- gui.rs `generate_handler!` 注册新命令
+- gui.rs `generate_handler!` 注册两个新命令
 
 ### ④ 前端（src/）
 
@@ -132,7 +140,10 @@ async fn activate_license(code: String) -> Result<ActivationResult, String>
 - 上半：授权状态卡——未激活红色「微信自动化核心功能未授权」/已激活绿色「授权正常」；
   激活成功但微信未开时显示「激活成功 ✓ 请打开微信 PC 客户端」+「重新初始化」按钮
 - 中部：激活码输入框 + 「立即激活」按钮（loading 态防重复提交；失败红字提示）
-- 底部：灰底引导卡「获取激活码请联系运营」（联系方式占位文案，随实现定稿）
+- 底部：灰底引导卡「获取激活码请联系运营」+ 运营联系方式——文案为前端常量
+  `ACTIVATION_CONTACT`（如「联系运营 QQ/微信：xxx」，具体号码实现时向运营取，
+  取不到先留「请联系您的服务管理员」通用文案，**不做配置项**——YAGNI，改文案
+  随发版即可）
 - 监听 state 事件：状态离开 Booting（进 WxInit）→ 显示成功态，2s 后跳回概览
 
 **App.vue**：
