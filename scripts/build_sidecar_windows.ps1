@@ -24,11 +24,28 @@ $OutDir = "src-tauri/binaries"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 Copy-Item "build/sidecar-dist/wxauto-sidecar.exe" "$OutDir/wxauto-sidecar-$Triple.exe" -Force
 
-# 冒烟：MOCK 模式发一条 wx.get_my_info，断言 mock 数据回来（不需要微信/授权）
+# ── 冒烟三条 ──────────────────────────────────────────────
+# 1) MOCK：mock 数据回来（原有，不触 wxautox4）
+# 2) 真路径 wx.init：CI 无授权 → 应收「结果帧」（licensed:false）；
+#    若收「错误帧」即打包缺陷（缺 pythoncom/comtypes 等导入级依赖）
+# 3) 真路径 wx.activate 假码：授权服务器拒绝是业务错，可接受；
+#    ModuleNotFoundError 是打包错——本次事故的直接复现路径
+$Exe = "$OutDir/wxauto-sidecar-$Triple.exe"
+
 $env:WXAUTO_MOCK = "1"
-$resp = '{"id": 1, "method": "wx.get_my_info", "params": {}}' | & "$OutDir/wxauto-sidecar-$Triple.exe" | Select-Object -First 1
-Write-Host "smoke resp: $resp"
-if (-not ($resp -match '"wxid"')) {
-    throw "sidecar exe MOCK 冒烟失败: $resp"
-}
-Write-Host "OK: $OutDir/wxauto-sidecar-$Triple.exe"
+$resp = '{"id": 1, "method": "wx.get_my_info", "params": {}}' | & $Exe | Select-Object -First 1
+Write-Host "smoke[1/3] mock wxid: $resp"
+if (-not ($resp -match '"wxid"')) { throw "sidecar exe MOCK 冒烟失败: $resp" }
+
+Remove-Item Env:WXAUTO_MOCK -ErrorAction SilentlyContinue
+$resp2 = '{"id": 2, "method": "wx.init", "params": {}}' | & $Exe | Select-Object -First 1
+Write-Host "smoke[2/3] init: $resp2"
+if (-not ($resp2 -match '"result"')) { throw "真路径 wx.init 应返回结果帧, 实得: $resp2" }
+if ($resp2 -match '"error"') { throw "真路径 wx.init 返回错误帧(疑似缺依赖): $resp2" }
+
+$resp3 = '{"id": 3, "method": "wx.activate", "params": {"code": "CI-SMOKE-FAKE"}}' | & $Exe | Select-Object -First 1
+Write-Host "smoke[3/3] activate: $resp3"
+if ($resp3 -match 'ModuleNotFoundError') { throw "真路径 wx.activate 缺依赖(本次事故形态): $resp3" }
+if (-not (($resp3 -match '"error"') -or ($resp3 -match '"result"'))) { throw "activate 应返回 JSON-RPC 帧, 实得: $resp3" }
+
+Write-Host "OK: $Exe"
