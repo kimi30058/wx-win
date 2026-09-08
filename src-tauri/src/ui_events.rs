@@ -10,6 +10,7 @@
 //! - `wxauto://status`      payload = { wsConnected, wxOnline }（组装帧，见下）
 //! - `wxauto://message`     payload = event:message 帧的 data 部分
 //! - `wxauto://command-log` payload = { requestId, action, success, error?, durationMs, ts }
+//! - `wxauto://init-fail`   payload { reason: string }（init 未就绪原因）
 //!
 //! **status 组装语义（Task 8 审查硬性输入 #1）**：core 的 event:status 上行帧
 //! （{kind,type,data,ts}，data 含 wxOnline/listeners/sidecarAlive）**没有**
@@ -31,6 +32,7 @@ pub const EVENT_STATE: &str = "wxauto://state";
 pub const EVENT_STATUS: &str = "wxauto://status";
 pub const EVENT_MESSAGE: &str = "wxauto://message";
 pub const EVENT_COMMAND_LOG: &str = "wxauto://command-log";
+pub const EVENT_INIT_FAIL: &str = "wxauto://init-fail";
 /// 运行日志事件名（与 desktop/src/stores/app.ts 的 listen() 字面量一致）
 pub const EVENT_APP_LOG: &str = "wxauto://app-log";
 
@@ -107,6 +109,13 @@ impl UiEventBridge {
                 });
                 self.emit(EVENT_STATUS, &payload).await;
             }
+            "init_fail" => {
+                // init 未就绪原因（licensed / wechat_missing）——激活页与横幅数据源
+                let payload = serde_json::json!({
+                    "reason": frame["data"]["reason"].as_str().unwrap_or_default(),
+                });
+                self.emit(EVENT_INIT_FAIL, &payload).await;
+            }
             // friend_request 等其余事件：前端无订阅（Listen 页主动 invoke 拉取），
             // 不转发（避免无消费者的事件洪泛）
             other => {
@@ -173,6 +182,21 @@ mod tests {
         let out = with_ws_connected(&frame, true);
         assert_eq!(out["wsConnected"], true);
         assert_eq!(out["data"]["wxOnline"], true, "原字段保留");
+    }
+
+    /// init_fail 帧路由：forward 后按 EVENT_INIT_FAIL 发射（payload 即前端契约；
+    /// 未 attach 时 emit 走丢弃分支——发射验证由 license_init.rs 帧级测试承担，
+    /// 此处覆盖路由代码路径与常量契约）
+    #[tokio::test]
+    async fn test_forward_init_fail_routes_to_event() {
+        let bridge = UiEventBridge::new();
+        assert_eq!(EVENT_INIT_FAIL, "wxauto://init-fail");
+        bridge
+            .forward_event_frame(&serde_json::json!({
+                "kind": "event", "type": "init_fail",
+                "data": {"reason": "licensed"}, "wsConnected": false,
+            }))
+            .await;
     }
 
     /// app-log 转发：entry JSON 经桥发射（payload 结构即前端契约）
