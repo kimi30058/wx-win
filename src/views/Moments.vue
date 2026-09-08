@@ -21,7 +21,8 @@
 
     <!-- 手动发布：publish_moment -->
     <t-card title="发布朋友圈" :bordered="false" class="block">
-      <t-form label-width="90px" @submit="onPublish">
+      <!-- :data 必绑：同 Settings.vue 事故（FormItem 校验按 name 从 form.data 取值，漏绑则文案必填恒拦） -->
+      <t-form :data="{ text }" label-width="90px" @submit="onPublish">
         <t-form-item label="文案" name="text" :rules="[{ required: true, message: '文案必填' }]">
           <t-textarea
             v-model="text"
