@@ -82,9 +82,15 @@ def dispatch(method, params):
     wx.init 成功后从 methods.get_wx_instance() 拉实例回写本模块全局 _wx
     （不 `import sidecar`——本文件以 __main__ 运行时会加载第二份模块实例）。
 
-    wx 实参惰性求值：wx.init 本身创建实例（_init 忽略 wx 参数），调用前实例必为
-    None，不能先求值 _get_wx()（Python 在调用前求值全部实参，否则首次 wx.init
-    直接 RuntimeError，本体不可达）。
+    wx 实参惰性求值豁免名单（wx.init / wx.activate）：wx.init 本身创建实例
+    （_init 忽略 wx 参数），调用前实例必为 None，不能先求值 _get_wx()（Python
+    在调用前求值全部实参，否则首次 wx.init 直接 RuntimeError，本体不可达）。
+    wx.activate 同理：未激活场景 wx.init 必失败、_wx 恒 None，而激活恰是
+    「未激活」场景的用户动作——不豁免则 _get_wx() 先抛「wx 未初始化」，
+    激活码根本到不了 methods._activate（终审 C1：真实设备激活 100% 不可用；
+    pytest 直连 methods.dispatch 绕过本包装层 + mock 冒烟 _wx 恒 None，
+    双重盲区漏进主线）。_activate 真实分支只触 wxautox4.utils.useful，
+    不消费 wx 实参，豁免无副作用。
     """
     global _wx
     if _wx is None and not MOCK:
@@ -92,7 +98,7 @@ def dispatch(method, params):
         inst = methods.get_wx_instance()
         if inst is not None:
             _wx = inst
-    wx_arg = None if method == "wx.init" else _get_wx()
+    wx_arg = None if method in ("wx.init", "wx.activate") else _get_wx()
     result = methods.dispatch(method, params, wx_arg, _msg_pool, _msg_pool_ts, _notify, MOCK)
     # wx.init 刚创建实例 → 立即回写，后续调用直接走全局
     if method == "wx.init" and not MOCK and _wx is None:

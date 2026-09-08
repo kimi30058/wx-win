@@ -917,6 +917,29 @@ def test_activate_mock_mode():
     assert bad["ok"] is False
 
 
+def test_sidecar_dispatch_activate_reaches_methods(monkeypatch):
+    """C1 回归：穿透 sidecar.py 包装层调 wx.activate（未激活场景）。
+
+    真实设备激活时序：wx.init 未授权失败 → _wx 恒 None → 用户提交激活码。
+    sidecar.dispatch 的 wx 实参惰性求值若不豁免 wx.activate，_get_wx() 会先
+    抛「wx 未初始化」——激活码根本到不了 methods._activate（终审 C1：
+    pytest 直连 methods.dispatch 绕过包装层 + mock 冒烟 _wx 恒 None，
+    双重盲区漏进主线）。本用例经 sidecar.dispatch 全链路验证豁免生效。
+    """
+    import sidecar
+
+    # 伪造 wxautox4：licensed=True 模拟 authenticate 后 check_license 回查通过
+    # （真实激活成功路径），authenticate 接受任意码
+    _install_fake_wxautox4(monkeypatch, licensed=True, authenticate_result=True)
+    # 未激活现场：sidecar 全局 _wx 恒 None（wx.init 从未成功创建实例）
+    monkeypatch.setattr(sidecar, "_wx", None)
+    monkeypatch.setattr(sidecar, "MOCK", False)
+    r = sidecar.dispatch("wx.activate", {"code": "X"})
+    assert r == {"ok": True, "message": "激活成功"}, (
+        f"sidecar.dispatch 应把 wx.activate 送达 methods._activate，实际: {r}"
+    )
+
+
 def test_init_mock_unlicensed_injection(monkeypatch):
     """WXAUTO_MOCK_UNLICENSED=1：mock init 回未授权；激活成功后翻转"""
     monkeypatch.setenv("WXAUTO_MOCK_UNLICENSED", "1")
