@@ -227,6 +227,11 @@ pub struct Supervisor {
     backoff_table: Arc<Vec<Duration>>,
     /// 事件出口（GUI 事件桥；None 时只进 WS 由 AgentLink 上报，这里跳过）
     event_sink: Option<Box<dyn Fn(Value) + Send + Sync>>,
+    /// 最近一次 init 失败原因快照（I1：init_fail 事件先于前端 listen 注册
+    /// 发出即永久丢失——tauri 事件无重放且每 sidecar 世代只发一次，前端
+    /// init 经 get_init_fail_reason 命令拉本缓存兜底；成功路径推进 WxInit
+    /// 前清 None）。RPC 失败不写（sidecar 死亡归重启域，不谎报授权失败）。
+    last_init_fail: RwLock<Option<String>>,
     /// 诊断：当前所处阶段（测试 / 排障插桩用）
     phase: RwLock<&'static str>,
 }
@@ -244,6 +249,7 @@ impl Supervisor {
             spawner: default_spawner(),
             backoff_table: Arc::new(RESTART_BACKOFF.to_vec()),
             event_sink: None,
+            last_init_fail: RwLock::new(None),
             phase: RwLock::new("constructed"),
         }
     }
@@ -251,6 +257,12 @@ impl Supervisor {
     /// 当前阶段名（诊断插桩；测试观察 Supervisor 推进位置）
     pub async fn current_phase(&self) -> String {
         self.phase.read().await.to_string()
+    }
+
+    /// 最近一次 init 失败原因快照（I1：get_init_fail_reason 命令数据源；
+    /// None = 无失败记录或已随成功路径清除）
+    pub async fn last_init_fail(&self) -> Option<String> {
+        self.last_init_fail.read().await.clone()
     }
 
     /// 注入自定义 spawner（测试用假 sidecar；生产默认 spawn_default）
@@ -359,7 +371,11 @@ impl Supervisor {
             // 未授权缺 failReason（旧 sidecar）也归一为 licensed——引导口径一致
             let reason = fail_reason.unwrap_or_else(|| "licensed".to_string());
             tracing::warn!(%reason, "wx.init 未就绪，保持 Booting（等待授权/微信引导）");
+            // I1：同步写快照缓存——init_fail 事件若先于前端 listen 注册发出
+            // 即永久丢失（无重放），get_init_fail_reason 命令从本缓存兜底。
+            // 仅 RPC 成功（init.is_some）才写：sidecar 死亡不谎报授权失败。
             if init.is_some() {
+                *self.last_init_fail.write().await = Some(reason.clone());
                 self.emit(serde_json::json!({
                     "kind": "event", "type": "init_fail",
                     "data": {"reason": reason},
@@ -368,6 +384,9 @@ impl Supervisor {
             }
             return;
         }
+        // 成功路径：推进 WxInit 前清快照——前端拉 get_init_fail_reason 不再
+        // 看到陈旧失败原因（授权灯正常转绿）
+        *self.last_init_fail.write().await = None;
         self.state.mark_wx_init(true).await;
 
         // 监听 resync：sidecar 可能刚重启，本地名单重放

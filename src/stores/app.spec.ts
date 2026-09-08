@@ -96,6 +96,44 @@ describe('激活状态推导（initFailReason × appState）', () => {
     expect(store.initFailReason).toBe('');
   });
 
+  it('get_init_fail_reason 快照兜底：init() 拉缓存落 initFailReason（I1）', async () => {
+    // 场景：init_fail 事件先于 listen 注册发出（永久丢失）——init() 经
+    // get_init_fail_reason 快照补救
+    const store = useAppStore();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_init_fail_reason') return Promise.resolve('licensed');
+      return Promise.resolve(null);
+    });
+    await store.init();
+    expect(invokeMock).toHaveBeenCalledWith('get_init_fail_reason', undefined);
+    expect(store.initFailReason).toBe('licensed');
+  });
+
+  it('快照兜底仅空值时覆盖：事件路径已落值不被快照回写', async () => {
+    const store = useAppStore();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_init_fail_reason') return Promise.resolve('wechat_missing');
+      return Promise.resolve(null);
+    });
+    await store.init();
+    // 事件路径先落 licensed（模拟 listen 注册后收到事件）
+    const reg = listenMock.mock.calls.find((c) => c[0] === 'wxauto://init-fail');
+    expect(reg).toBeTruthy();
+    if (!reg) return;
+    reg[1]({ payload: { reason: 'licensed' } });
+    expect(store.initFailReason, '事件值优先，快照不覆盖').toBe('licensed');
+  });
+
+  it('快照兜底守卫：未知 reason 忽略、null 快照不落值', async () => {
+    const store = useAppStore();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_init_fail_reason') return Promise.resolve('something_odd');
+      return Promise.resolve(null);
+    });
+    await store.init();
+    expect(store.initFailReason, '未知 reason 守卫忽略').toBe('');
+  });
+
   it('activateLicense：invoke 透传 + 判别联合返回', async () => {
     const store = useAppStore();
     invokeMock.mockImplementation((cmd: string) => {

@@ -14,8 +14,9 @@
  * - `wxauto://init-fail` payload { reason: 'licensed'|'wechat_missing' }
  *
  * invoke 契约：get_config / save_config / get_listen_names / add_listen /
- * remove_listen / manual_execute / connect / disconnect / get_recent_logs /
- * clear_logs / activate_license / retry_init。
+ * remove_listen / manual_execute / connect / disconnect / get_app_state /
+ * get_init_fail_reason / get_recent_logs / clear_logs / activate_license /
+ * retry_init。
  * 注意 manual_execute 在 Rust 侧是 `Result<Value, String>`——业务载荷 resolve、
  * 失败字符串 reject（无 {success} 包装帧），故本 store 的 manualExecute 返回
  * 判别联合 ManualOutcome，视图按 ok 分支处理。
@@ -325,6 +326,18 @@ export const useAppStore = defineStore('app', {
         // 状态灯落到真值的唯一兜底路径。
         const snap = await invoke<unknown>('get_app_state');
         if (isAppStateName(snap)) this.appState = snap;
+        // initFailReason 快照兜底（I1）：init_fail 事件每 sidecar 世代只发
+        // 一次，若先于本 listen 注册发出即永久丢失（授权灯恒灰）——拉
+        // Supervisor 缓存的最近失败原因补救。仅当前值为空时覆盖：事件
+        // 路径（更实时）优先，快照只兜底不回写覆盖。
+        const failSnap = await invoke<unknown>('get_init_fail_reason');
+        if (
+          this.initFailReason === '' &&
+          typeof failSnap === 'string' &&
+          KNOWN_INIT_FAIL_REASONS.includes(failSnap)
+        ) {
+          this.initFailReason = failSnap as InitFailReasonName;
+        }
         // 运行日志历史补齐（bridge attach 前的条目事件无重放——快照兜底）
         const logs = await invoke<unknown>('get_recent_logs');
         if (Array.isArray(logs)) {

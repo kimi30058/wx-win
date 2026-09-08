@@ -73,6 +73,7 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             connect,
             disconnect,
             get_app_state,
+            get_init_fail_reason,
             get_recent_logs,
             clear_logs,
             activate_license,
@@ -253,8 +254,7 @@ mod tests {
 
     /// get_recent_logs 命令：ring 有两条时快照返回（旧在前）
     #[tokio::test]
-    async fn test_invoke_get_recent_logs_returns_snapshot() {
-        use crate::ui_log::{AppLogEntry, AppLogLevel, AppLogSource, LogRing};
+    async fn test_invoke_get_recent_logs_returns_snapshot() {        use crate::ui_log::{AppLogEntry, AppLogLevel, AppLogSource, LogRing};
 
         let app = tauri::test::mock_builder()
             .invoke_handler(tauri::generate_handler![get_recent_logs])
@@ -302,5 +302,50 @@ mod tests {
         assert_eq!(logs.len(), 2);
         assert_eq!(logs[0]["message"], "先");
         assert_eq!(logs[1]["level"], "warn");
+    }
+
+    /// I1：get_init_fail_reason 命令注册与分发——mock-runtime 完整 invoke 链
+    /// （generate_handler → manage → State 取态 → resolve）。未装配时回 None
+    /// 而非 reject（前端 init 拉快照不因装配时序炸 initError）。
+    #[tokio::test]
+    async fn test_invoke_get_init_fail_reason_resolves_none_when_not_assembled() {
+        let app = tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![get_init_fail_reason])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app 构建失败");
+
+        let ctx = AppStateCtx::shell(
+            default_config_path(),
+            UiEventBridge::new(),
+            crate::ui_log::LogRing::new(10),
+            None,
+        );
+        app.manage(ctx);
+
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("mock webview 构建失败");
+
+        let resp = tauri::test::get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: "get_init_fail_reason".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().expect("url 解析失败"),
+                body: tauri::ipc::InvokeBody::default(),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+        .map(|b| {
+            b.deserialize::<Option<String>>()
+                .expect("响应应为 Option<String>")
+        });
+        // 未装配：resolve None（Supervisor 未跑 init，无失败可言）
+        match resp {
+            Ok(v) => assert_eq!(v, None, "未装配时应 resolve None"),
+            Err(e) => panic!("invoke reject 即 I1 命令装配破坏: {e}"),
+        }
     }
 }
