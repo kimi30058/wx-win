@@ -130,6 +130,8 @@ def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
     """wx.init：WxParam 全局参数 → WeChat(version) 中英文双兜底 → check_license
 
     wx 实参为 None（sidecar.py 对 wx.init 特判惰性求值）；实例存 _instance。
+    失败三态：failReason 取 "licensed"（未授权）或 "wechat_missing"
+    （授权过但微信未开）；成功时无该字段。
     """
     global _instance, _license_ok
     if mock:
@@ -146,15 +148,25 @@ def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
     WxParam.DEFAULT_MESSAGE_YBIAS = 40
 
     _license_ok = bool(check_license())
+    # 失败三态：未授权恒 licensed（可行动根因优先）；授权过但微信未开才是
+    # wechat_missing——旧版两版本兜底都抛会整体 RPC 报错，现降为带原因返回
+    fail_reason = None if _license_ok else "licensed"
     try:
         _instance = WeChat(version="微信")
     except Exception:  # noqa: BLE001 — 国际版微信兜底（参考项目验证的双版本尝试）
-        _instance = WeChat(version="WeChat")
-    return {
+        try:
+            _instance = WeChat(version="WeChat")
+        except Exception:  # noqa: BLE001
+            if _license_ok:
+                fail_reason = "wechat_missing"
+    result = {
         "licensed": _license_ok,
         "wxid": getattr(_instance, "wxid", ""),
         "nickname": getattr(_instance, "nickname", ""),
     }
+    if fail_reason:
+        result["failReason"] = fail_reason
+    return result
 
 
 def _activate(params, wx, msg_pool, msg_pool_ts, notify, mock):

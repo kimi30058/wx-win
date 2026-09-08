@@ -21,6 +21,7 @@ import time
 sys.path.insert(0, os.path.dirname(__file__))
 
 import pytest  # noqa: E402
+import methods  # noqa: E402 — 模块级引用供 autouse fixture 隔离 _init 全局态
 from unittest.mock import MagicMock  # noqa: E402
 
 
@@ -199,6 +200,41 @@ def _dispatch(method, params, wx, notify=None, mock=False, msg_pool=None, msg_po
 def test_wx_init_mock_mode():
     r = _dispatch("wx.init", {}, None, mock=True)
     assert r["licensed"] is True
+
+
+# ══════════ wx.init failReason 三态 ═════════
+
+
+@pytest.fixture(autouse=True)
+def _reset_init_globals(monkeypatch):
+    """_init 写模块级 _instance/_license_ok——用例间隔离，防跨测试泄漏"""
+    monkeypatch.setattr(methods, "_instance", None)
+    monkeypatch.setattr(methods, "_license_ok", False)
+    yield
+
+
+def test_init_real_path_licensed_ok(monkeypatch):
+    """授权过 + 微信在：无 failReason 字段"""
+    _install_fake_wxautox4(monkeypatch, licensed=True, wechat_ok=True)
+    r = _dispatch("wx.init", {}, None)
+    assert r["licensed"] is True
+    assert "failReason" not in r
+
+
+def test_init_real_path_unlicensed(monkeypatch):
+    """未授权：failReason=licensed（WeChat 同失败也不改口径——授权是可行动根因）"""
+    _install_fake_wxautox4(monkeypatch, licensed=False, wechat_ok=False)
+    r = _dispatch("wx.init", {}, None)
+    assert r["licensed"] is False
+    assert r["failReason"] == "licensed"
+
+
+def test_init_real_path_wechat_missing(monkeypatch):
+    """授权过 + 微信未开（中英两版本兜底都抛）：failReason=wechat_missing"""
+    _install_fake_wxautox4(monkeypatch, licensed=True, wechat_ok=False)
+    r = _dispatch("wx.init", {}, None)
+    assert r["licensed"] is True
+    assert r["failReason"] == "wechat_missing"
 
 
 def test_wx_get_my_info_reads_id_key(fakewx):
@@ -807,9 +843,11 @@ def test_sidecar_writers_serialized_under_lock():
 # ══════════ wx.activate（激活码认证）══════════
 
 
-def _install_fake_wxautox4(monkeypatch, licensed=True, authenticate_result=True):
+def _install_fake_wxautox4(monkeypatch, licensed=True, authenticate_result=True, wechat_ok=True):
     """伪造 wxautox4 包：sys.modules 预置三模块 + 顶层属性挂接。
 
+    wechat_ok=False 时 WeChat() 构造即抛（模拟微信窗口未找到，供 wx.init
+    三态测试使用）；wx.activate 不触 WeChat，默认值即可。
     返回 calls 字典记录 authenticate 实参（断言激活码透传）。
     """
     import types
@@ -820,6 +858,11 @@ def _install_fake_wxautox4(monkeypatch, licensed=True, authenticate_result=True)
         calls["authenticate"].append(code)
         return authenticate_result
 
+    class _FakeWeChat:
+        def __init__(self, version=None):
+            if not wechat_ok:
+                raise RuntimeError("微信窗口未找到")
+
     useful = types.ModuleType("wxautox4.utils.useful")
     useful.check_license = lambda: licensed
     useful.authenticate = _authenticate
@@ -827,7 +870,7 @@ def _install_fake_wxautox4(monkeypatch, licensed=True, authenticate_result=True)
     utils.useful = useful
     top = types.ModuleType("wxautox4")
     top.utils = utils
-    top.WeChat = object  # wx.activate 不触 WeChat，占位即可
+    top.WeChat = _FakeWeChat
     top.WxParam = types.SimpleNamespace()
 
     monkeypatch.setitem(sys.modules, "wxautox4", top)
