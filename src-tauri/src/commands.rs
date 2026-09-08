@@ -7,10 +7,16 @@
 //! 每命令先 `ctx.ready().await`——两段式装配下 webview 先于装配完成的
 //! invoke 在此等待（而非报「state not managed」）；装配失败拿到原因。
 
-use serde_json::Value;
+use std::time::Duration;
+
+use serde_json::{json, Value};
 use tauri::State;
+use wxauto_desktop::sidecar::spec::methods;
 
 use crate::app_state::{config_to_json, extract_settings_patch, AppStateCtx};
+
+/// 激活超时：authenticate 可能走网络校验，比 init 的 10s 宽松
+const ACTIVATE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 读配置（camelCase 序列化；token 不回传——keyring 只写不读）
 #[tauri::command]
@@ -106,4 +112,34 @@ pub fn get_recent_logs(ctx: State<'_, AppStateCtx>) -> Vec<serde_json::Value> {
 #[tauri::command]
 pub fn clear_logs(ctx: State<'_, AppStateCtx>) {
     ctx.log_ring.clear();
+}
+
+/// 激活 wxautox4（直连 sidecar wx.activate；绕过 16-action 白名单——
+/// 激活是编排层动作，与 wx.init 同类）。成功即内联重试 init 一次
+/// （失败即止：微信未开场景每次白耗 UIA 扫描，由用户择机 retry_init）。
+#[tauri::command]
+pub async fn activate_license(ctx: State<'_, AppStateCtx>, code: String) -> Result<Value, String> {
+    let code = code.trim().to_string();
+    if code.is_empty() {
+        return Err("激活码不能为空".to_string());
+    }
+    let assembled = ctx.ready().await?;
+    let result = assembled
+        .session
+        .direct_call_with_timeout(methods::ACTIVATE, json!({ "code": code }), ACTIVATE_TIMEOUT)
+        .await
+        .map_err(|e| format!("激活请求失败：{e}"))?;
+    if result["ok"].as_bool().unwrap_or(false) {
+        assembled.supervisor.retry_init().await;
+    }
+    Ok(result)
+}
+
+/// 手动重跑 init 序列（激活页「重新初始化」按钮——sidecar 活着时
+/// Supervisor 不会自动重跑 init，必须有显式入口）
+#[tauri::command]
+pub async fn retry_init(ctx: State<'_, AppStateCtx>) -> Result<(), String> {
+    let assembled = ctx.ready().await?;
+    assembled.supervisor.retry_init().await;
+    Ok(())
 }

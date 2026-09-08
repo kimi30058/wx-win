@@ -75,6 +75,8 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             get_app_state,
             get_recent_logs,
             clear_logs,
+            activate_license,
+            retry_init,
         ])
         .setup(move |app| {
             // ① 同步 manage 壳（invoke 从此可寻；装配在 OnceCell 内进行）。
