@@ -18,12 +18,26 @@ a = Analysis(
     pathex=["."],
     binaries=[],
     datas=[],
+    # wxautox4 传递依赖显式补齐（2026-09-08 真机事故：wxautox4 是编译型
+    # wheel，.pyd 内部的 import 静态分析看不见，冻结包缺 requests 导致
+    # activate 抛 ModuleNotFoundError）。清单来源 = PyPI wxautox4 41.1.1.post1
+    # 的 requires_dist：colorama/comtypes/pillow/psutil/pyperclip/pywin32/
+    # requests/sounddevice/tenacity（comtypes 原清单已有）。
+    # ⚠ wxautox4 升级后必须对照 PyPI requires_dist 重新核对此清单！
     hiddenimports=[
         "wxautox4",
         "wxautox4.utils.useful",
         "pythoncom",
         "win32com",
         "comtypes",
+        "colorama",
+        "pillow",
+        "psutil",
+        "pyperclip",
+        "pywin32",
+        "requests",
+        "sounddevice",
+        "tenacity",
     ],
     hookspath=[],
     hooksconfig={},
