@@ -1,8 +1,9 @@
 <template>
   <div class="overview">
     <!-- 四指示灯：sidecar / WS / 微信 / 授权（spec §3.4 概览行） -->
+    <!-- TDesign 为 12 列栅格：4 卡各 span3（4×3=12）恰满一行，span4 会溢出换行 -->
     <t-row :gutter="16">
-      <t-col :span="4">
+      <t-col :span="3">
         <t-card title="Sidecar" :bordered="false">
           <div class="lamp-row">
             <span
@@ -13,7 +14,7 @@
           </div>
         </t-card>
       </t-col>
-      <t-col :span="4">
+      <t-col :span="3">
         <t-card title="服务器连接" :bordered="false">
           <div class="lamp-row">
             <span class="lamp" :class="store.wsConnected === null ? 'lamp--gray' : store.wsConnected ? 'lamp--green' : 'lamp--red'" />
@@ -21,7 +22,7 @@
           </div>
         </t-card>
       </t-col>
-      <t-col :span="4">
+      <t-col :span="3">
         <t-card title="微信" :bordered="false">
           <div class="lamp-row">
             <span class="lamp" :class="store.wxOnline === null ? 'lamp--gray' : store.wxOnline ? 'lamp--green' : 'lamp--red'" />
@@ -29,7 +30,7 @@
           </div>
         </t-card>
       </t-col>
-      <t-col :span="4">
+      <t-col :span="3">
         <t-card title="授权" :bordered="false">
           <div class="lamp-row">
             <span
