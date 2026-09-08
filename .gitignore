@@ -21,3 +21,7 @@ build/
 src-tauri/binaries/*
 !src-tauri/binaries/.gitkeep
 !src-tauri/binaries/wxauto-sidecar-x86_64-unknown-linux-gnu
+
+# SDD 工作区（计划执行草稿；git 历史是最终记录）
+.superpowers/
+.claude/worktrees/
