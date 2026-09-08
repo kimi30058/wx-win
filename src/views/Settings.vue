@@ -1,7 +1,9 @@
 <template>
   <t-card title="设置" :bordered="false">
     <template #description>服务器连接参数；token 存系统凭据管理器（keyring），不回显</template>
-    <t-form v-if="formReady" label-width="120px" @submit="onSave">
+    <!-- :data 必绑：TDesign FormItem 校验按 name 从 form.data 取值（而非输入框 v-model），
+         漏绑则 required 恒判空、保存永远被"必填"拦截（2026-09-08 事故，见 Settings.spec.ts） -->
+    <t-form v-if="formReady" :data="form" label-width="120px" @submit="onSave">
       <t-form-item label="服务器地址" name="serverUrl" :rules="[{ required: true, message: '服务器地址必填' }]">
         <t-input v-model="form.serverUrl" placeholder="ws://127.0.0.1:60021" />
       </t-form-item>
