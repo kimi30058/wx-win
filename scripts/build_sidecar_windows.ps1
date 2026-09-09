@@ -11,6 +11,9 @@ python --version
 python -m pip install --upgrade pip pyinstaller | Out-Null
 python -m pip install -r sidecar-python/requirements.txt | Out-Null
 
+# 预检：tkinter 必须可用（wxautox4 动态依赖；构建机没有则冻结包必缺，冒烟才发现就晚了一轮）
+python -c "import tkinter; print('tkinter OK', tkinter.TkVersion)"
+
 # 冻结（dist 输出到临时目录，再改名搬运——避免把不带 triple 的名字留进 binaries/）
 python -m PyInstaller `
     --distpath build/sidecar-dist `
