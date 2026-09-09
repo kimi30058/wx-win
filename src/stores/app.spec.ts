@@ -80,39 +80,63 @@ describe('激活状态推导（initFailReason × appState）', () => {
     const cb = reg[1];
     cb({ payload: { reason: 'licensed' } });
     expect(store.initFailReason).toBe('licensed');
+    expect(store.initFailDetail, '无 detail 帧不落细节').toBe('');
     cb({ payload: { reason: '初始化失败：sidecar 错误: [-32603] X' } });
     expect(store.initFailReason, '未知错误串原样覆盖（透传）').toBe('初始化失败：sidecar 错误: [-32603] X');
+  });
+
+  it('init-fail 事件携带 detail 落 initFailDetail（wechat_missing 误报修复）', async () => {
+    const store = useAppStore();
+    await store.init();
+    const reg = listenMock.mock.calls.find((c) => c[0] === 'wxauto://init-fail');
+    expect(reg).toBeTruthy();
+    if (!reg) return;
+    reg[1]({
+      payload: { reason: 'wechat_missing', detail: 'RuntimeError: 微信窗口未找到' },
+    });
+    expect(store.initFailReason).toBe('wechat_missing');
+    expect(store.initFailDetail).toBe('RuntimeError: 微信窗口未找到');
+    // 无 detail 的后续帧（licensed）清细节——旧值不残留误导
+    reg[1]({ payload: { reason: 'licensed' } });
+    expect(store.initFailDetail).toBe('');
   });
 
   it('状态进入 WxInit 及之后清 initFailReason', async () => {
     const store = useAppStore();
     await store.init();
-    store.initFailReason = 'licensed';
+    store.initFailReason = 'wechat_missing';
+    store.initFailDetail = 'RuntimeError: X';
     const reg = listenMock.mock.calls.find((c) => c[0] === 'wxauto://state');
     expect(reg).toBeTruthy();
     if (!reg) return;
     reg[1]({ payload: 'WxInit' });
     expect(store.appState).toBe('WxInit');
     expect(store.initFailReason).toBe('');
+    expect(store.initFailDetail, '成功路径双清（细节不残留）').toBe('');
   });
 
   it('get_init_fail_reason 快照兜底：init() 拉缓存落 initFailReason（I1）', async () => {
     // 场景：init_fail 事件先于 listen 注册发出（永久丢失）——init() 经
-    // get_init_fail_reason 快照补救
+    // get_init_fail_reason 快照补救。Rust 侧返回 {reason, detail} 对象
     const store = useAppStore();
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === 'get_init_fail_reason') return Promise.resolve('licensed');
+      if (cmd === 'get_init_fail_reason') {
+        return Promise.resolve({ reason: 'wechat_missing', detail: 'RuntimeError: 微信窗口未找到' });
+      }
       return Promise.resolve(null);
     });
     await store.init();
     expect(invokeMock).toHaveBeenCalledWith('get_init_fail_reason', undefined);
-    expect(store.initFailReason).toBe('licensed');
+    expect(store.initFailReason).toBe('wechat_missing');
+    expect(store.initFailDetail, '快照路径同样落细节').toBe('RuntimeError: 微信窗口未找到');
   });
 
   it('快照兜底仅空值时覆盖：事件路径已落值不被快照回写', async () => {
     const store = useAppStore();
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === 'get_init_fail_reason') return Promise.resolve('wechat_missing');
+      if (cmd === 'get_init_fail_reason') {
+        return Promise.resolve({ reason: 'wechat_missing', detail: null });
+      }
       return Promise.resolve(null);
     });
     await store.init();
@@ -127,11 +151,23 @@ describe('激活状态推导（initFailReason × appState）', () => {
   it('快照兜底守卫：空串/null 快照不落值（未知串透传）', async () => {
     const store = useAppStore();
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === 'get_init_fail_reason') return Promise.resolve('');
+      if (cmd === 'get_init_fail_reason') return Promise.resolve(null);
       return Promise.resolve(null);
     });
     await store.init();
-    expect(store.initFailReason, '空串快照不落值').toBe('');
+    expect(store.initFailReason, 'null 快照不落值').toBe('');
+  });
+
+  it('快照兜底守卫：旧形状字符串快照兼容不误伤', async () => {
+    // Rust 侧 InitFailInfo 序列化恒为对象；此用例锁定守卫行为——
+    // 非对象快照（异常形态）不落值也不抛错
+    const store = useAppStore();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_init_fail_reason') return Promise.resolve('licensed');
+      return Promise.resolve(null);
+    });
+    await store.init();
+    expect(store.initFailReason, '非对象形状静默忽略').toBe('');
   });
 
   it('activateLicense：invoke 透传 + 判别联合返回', async () => {
@@ -187,9 +223,11 @@ describe('initFailReason 未知值透传（P0-3）', () => {
 
   it('快照兜底不再丢弃未知值', async () => {
     const store = bootStore();
-    // get_init_fail_reason 返回未知串（Task 3 起 Rust 会写 init RPC 错误帧）
+    // get_init_fail_reason 返回未知 reason（Task 3 起 Rust 会写 init RPC 错误帧）
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === 'get_init_fail_reason') return Promise.resolve('初始化失败：sidecar 错误: [-32603] X');
+      if (cmd === 'get_init_fail_reason') {
+        return Promise.resolve({ reason: '初始化失败：sidecar 错误: [-32603] X', detail: null });
+      }
       if (cmd === 'get_app_state') return Promise.resolve('SidecarBooting');
       if (cmd === 'get_recent_logs') return Promise.resolve([]);
       return Promise.resolve(null);

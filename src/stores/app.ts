@@ -11,8 +11,9 @@
  * - `wxauto://message`  payload MessageItem
  * - `wxauto://command-log` payload CommandLogItem
  * - `wxauto://app-log`  payload AppLogItem（运行日志，1000 环形）
- * - `wxauto://init-fail` payload { reason: string }（已知值 'licensed'/
- *   'wechat_missing'；P0-3 起还可能是任意错误串——Rust init RPC 错误帧透传）
+ * - `wxauto://init-fail` payload { reason: string; detail: string }（已知值
+ *   'licensed'/'wechat_missing'；P0-3 起还可能是任意错误串——Rust init RPC
+ *   错误帧透传；detail 为 wechat_missing 场景的异常细节，缺省 ''）
  *
  * invoke 契约：get_config / save_config / get_listen_names / add_listen /
  * remove_listen / manual_execute / connect / disconnect / get_app_state /
@@ -49,11 +50,17 @@ export interface ActivationOutcome {
   message: string;
 }
 
-/** init-fail 载荷守卫 */
-function isInitFailPayload(v: unknown): v is { reason: string } {
+/** init-fail 载荷守卫（detail 可缺——旧 sidecar 帧/licensed 帧） */
+function isInitFailPayload(v: unknown): v is { reason: string; detail?: unknown } {
   if (typeof v !== 'object' || v === null) return false;
   const reason = (v as { reason?: unknown }).reason;
   return typeof reason === 'string';
+}
+
+/** get_init_fail_reason 快照守卫：Rust InitFailInfo 序列化形状
+ *  `{reason: string, detail: string | null}`；非对象形状静默忽略 */
+function isInitFailSnapshot(v: unknown): v is { reason: string; detail: unknown } {
+  return isInitFailPayload(v);
 }
 
 /** 六态中文标签（概览指示灯 / 状态条展示） */
@@ -228,6 +235,8 @@ export const useAppStore = defineStore('app', {
     activeView: 'overview',
     /** init 未就绪原因（wxauto://init-fail 最后值；''=无） */
     initFailReason: '' as InitFailReasonName,
+    /** init 失败细节（wechat_missing 场景的异常串；''=无/未携带） */
+    initFailDetail: '',
     /** WS 连接态：null=尚未收到状态帧（灰色「未知」） */
     wsConnected: null as boolean | null,
     /** 微信在线态：null=尚未收到状态帧 */
@@ -282,7 +291,10 @@ export const useAppStore = defineStore('app', {
           await listen<unknown>('wxauto://state', (e) => {
             if (isAppStateName(e.payload)) {
               this.appState = e.payload;
-              if (LICENSE_PASSED_STATES.includes(e.payload)) this.initFailReason = '';
+              if (LICENSE_PASSED_STATES.includes(e.payload)) {
+                this.initFailReason = '';
+                this.initFailDetail = '';
+              }
             }
           }),
         );
@@ -290,8 +302,11 @@ export const useAppStore = defineStore('app', {
           await listen<unknown>('wxauto://init-fail', (e) => {
             // 已知两值与未知错误串均原样透传（P0-3）：展示层按 getter 判等，
             // 未知串落入激活页第 4 态；载荷守卫只验 reason 是 string。
+            // detail 缺省落 ''（旧 sidecar 帧/licensed 帧——细节行不显示）
             if (isInitFailPayload(e.payload)) {
               this.initFailReason = e.payload.reason;
+              this.initFailDetail =
+                typeof e.payload.detail === 'string' ? e.payload.detail : '';
             }
           }),
         );
@@ -331,14 +346,13 @@ export const useAppStore = defineStore('app', {
         // initFailReason 快照兜底（I1）：init_fail 事件每 sidecar 世代只发
         // 一次，若先于本 listen 注册发出即永久丢失（授权灯恒灰）——拉
         // Supervisor 缓存的最近失败原因补救。仅当前值为空时覆盖：事件
-        // 路径（更实时）优先，快照只兜底不回写覆盖。
+        // 路径（更实时）优先，快照只兜底不回写覆盖。快照形状为
+        // {reason, detail}（Rust InitFailInfo；非对象形状静默忽略）。
         const failSnap = await invoke<unknown>('get_init_fail_reason');
-        if (
-          this.initFailReason === '' &&
-          typeof failSnap === 'string' &&
-          failSnap !== ''
-        ) {
-          this.initFailReason = failSnap;
+        if (this.initFailReason === '' && isInitFailSnapshot(failSnap) && failSnap.reason !== '') {
+          this.initFailReason = failSnap.reason;
+          this.initFailDetail =
+            typeof failSnap.detail === 'string' ? failSnap.detail : '';
         }
         // 运行日志历史补齐（bridge attach 前的条目事件无重放——快照兜底）
         const logs = await invoke<unknown>('get_recent_logs');

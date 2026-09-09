@@ -6,6 +6,14 @@
         <span class="lamp" :class="lampClass" />
         <span>{{ statusText }}</span>
       </div>
+      <!-- wechat_missing 场景：异常细节 + 版本区间提示（判定无法区分微信
+           没开/未登录/版本超区间——给真机排障与用户核对的锚点） -->
+      <div v-if="store.wechatMissing" class="wechat-missing-hints block-inline">
+        <div v-if="store.initFailDetail" class="status-detail">
+          失败详情：{{ store.initFailDetail }}
+        </div>
+        <div class="version-hint">{{ WECHAT_VERSION_HINT }}</div>
+      </div>
       <!-- 已激活但微信未开：显式重新初始化入口（sidecar 活着 Supervisor 不自动重跑 init） -->
       <t-button
         v-if="store.wechatMissing"
@@ -52,6 +60,9 @@ import { useAppStore } from '../stores/app';
 /** 运营联系方式（改文案随发版即可——YAGNI 不做配置项） */
 const ACTIVATION_CONTACT = 'wxautox4 激活码为按设备授权（一机一码，激活后永久有效），请联系您的服务管理员获取。';
 
+/** 微信版本区间提示（wxautox4 内核支持的 PC 版范围，随发版更新） */
+const WECHAT_VERSION_HINT = '请确认微信 PC 客户端已打开并登录（支持版本 4.1.9 ~ 4.1.13.12，版本不符请先调整）';
+
 const store = useAppStore();
 const form = reactive({ code: '' });
 const activating = ref(false);
@@ -75,7 +86,7 @@ const statusText = ref('正在检测授权状态…');
 function refreshStatusText() {
   if (store.licensePassed) statusText.value = 'wxautox4 授权正常';
   else if (store.needsActivation) statusText.value = 'wxautox4 未激活：微信自动化核心功能不可用';
-  else if (store.wechatMissing) statusText.value = '已激活，但未检测到微信客户端——请打开微信 PC 客户端后点击「重新初始化」';
+  else if (store.wechatMissing) statusText.value = '已激活，但连接微信客户端失败——请打开微信 PC 客户端并登录后点击「重新初始化」';
   else if (initErrorText.value) {
     statusText.value = `初始化错误：${initErrorText.value}——程序文件可能不完整，请重新安装或联系管理员`;
   }
@@ -173,6 +184,16 @@ watch(
 }
 .block-inline {
   margin-top: 12px;
+}
+.wechat-missing-hints {
+  font-size: 13px;
+  color: var(--td-text-color-secondary);
+}
+.status-detail {
+  word-break: break-all;
+}
+.version-hint {
+  margin-top: 4px;
 }
 .contact {
   color: var(--td-text-color-secondary);

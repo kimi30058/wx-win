@@ -34,6 +34,8 @@ _license_ok = False
 # mock 注入：未授权初始态（集成冒烟用；真实路径不受影响）。
 # wx.activate 成功后翻转（见 _activate mock 分支）
 _MOCK_LICENSE_STATE = os.environ.get("WXAUTO_MOCK_UNLICENSED", "") == "1"
+# mock 注入：微信未开态（GUI 冒烟/前端联调用，镜像上面同款模式）
+_MOCK_WECHAT_MISSING_STATE = os.environ.get("WXAUTO_MOCK_WECHAT_MISSING", "") == "1"
 
 
 def get_wx_instance():
@@ -136,7 +138,9 @@ def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
 
     wx 实参为 None（sidecar.py 对 wx.init 特判惰性求值）；实例存 _instance。
     失败三态：failReason 取 "licensed"（未授权）或 "wechat_missing"
-    （授权过但微信未开）；成功时无该字段。
+    （授权过但微信未开）；成功时无该字段。failDetail 携带 wechat_missing
+    场景的异常细节（类型: 消息）——判定条件无法区分微信没开/未登录/版本
+    超区间，细节是真机排障裁决真实根因的唯一线索。
     """
     global _instance, _license_ok
     if mock:
@@ -146,6 +150,14 @@ def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
         _license_ok = not _MOCK_LICENSE_STATE
         if _MOCK_LICENSE_STATE:
             return {"licensed": False, "wxid": "", "nickname": "", "failReason": "licensed"}
+        if _MOCK_WECHAT_MISSING_STATE:
+            return {
+                "licensed": True,
+                "wxid": "",
+                "nickname": "",
+                "failReason": "wechat_missing",
+                "failDetail": "模拟：微信客户端未打开",
+            }
         return {"licensed": True, "wxid": "mock_wx", "nickname": "模拟设备"}
     # 真实导入（仅 Windows + 已 pip install wxautox4 时可达）
     sidecar_log.log("INFO", "wx.init 开始（真实模式）")
@@ -164,14 +176,19 @@ def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
             # 失败三态：未授权恒 licensed（可行动根因优先）；授权过但微信未开才是
             # wechat_missing——旧版两版本兜底都抛会整体 RPC 报错，现降为带原因返回
             fail_reason = None if _license_ok else "licensed"
+            fail_detail = None
             try:
                 _instance = WeChat(version="微信")
-            except Exception:  # noqa: BLE001 — 国际版微信兜底（参考项目验证的双版本尝试）
+            except Exception as e:  # noqa: BLE001 — 国际版微信兜底（参考项目验证的双版本尝试）
+                # 留痕铁律（2026-09-09 真机事故）：静默吞掉=真机零线索
+                sidecar_log.log("WARN", f"wx.init WeChat(version=微信) 失败: {type(e).__name__}: {e}")
                 try:
                     _instance = WeChat(version="WeChat")
-                except Exception:  # noqa: BLE001
+                except Exception as e2:  # noqa: BLE001
+                    sidecar_log.log("WARN", f"wx.init WeChat(version=WeChat) 失败: {type(e2).__name__}: {e2}")
                     if _license_ok:
                         fail_reason = "wechat_missing"
+                        fail_detail = f"{type(e2).__name__}: {e2}"
             result = {
                 "licensed": _license_ok,
                 "wxid": getattr(_instance, "wxid", ""),
@@ -179,6 +196,8 @@ def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
             }
             if fail_reason:
                 result["failReason"] = fail_reason
+            if fail_detail:
+                result["failDetail"] = fail_detail
     except SystemExit:
         # wxautox4 check_license 语境的 SystemExit=未授权设备裸退（2026-09-09
         # CI 六跑实证：横幅 print 到 stdout + raise SystemExit，except Exception
@@ -186,7 +205,8 @@ def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
         _license_ok = False
         sidecar_log.log("WARN", "wx.init：wxautox4 未授权 SystemExit 裸退，归一 licensed 三态")
         return {"licensed": False, "wxid": "", "nickname": "", "failReason": "licensed"}
-    sidecar_log.log("INFO", f"wx.init 完成: licensed={_license_ok} failReason={fail_reason}")
+    detail_seg = f" detail={fail_detail}" if fail_detail else ""
+    sidecar_log.log("INFO", f"wx.init 完成: licensed={_license_ok} failReason={fail_reason}{detail_seg}")
     return result
 
 

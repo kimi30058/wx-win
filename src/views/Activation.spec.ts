@@ -112,6 +112,37 @@ describe('Activation 视图', () => {
     expect(retryCall).toBeDefined();
   });
 
+  it('wechat_missing + detail：显示异常细节行与版本区间提示（误报修复）', async () => {
+    const wrapper = mountActivation();
+    const { useAppStore } = await import('../stores/app');
+    const store = useAppStore();
+    store.appState = 'SidecarBooting';
+    store.initFailReason = 'wechat_missing';
+    store.initFailDetail = 'RuntimeError: 微信窗口未找到';
+    await flushPromises();
+    const text = wrapper.text();
+    // 异常细节原样显示（真机排障裁决线索）
+    expect(text).toContain('RuntimeError: 微信窗口未找到');
+    // 版本区间静态提示（微信版本超区间也被归 wechat_missing——给用户核对锚点）
+    expect(text).toContain('4.1.9');
+    expect(text).toContain('4.1.13.12');
+    // 文案不再断言「未检测到微信客户端」（判定过宽时误导）
+    expect(text).not.toContain('未检测到微信客户端');
+  });
+
+  it('wechat_missing 无 detail：细节行隐藏、版本提示仍在', async () => {
+    const wrapper = mountActivation();
+    const { useAppStore } = await import('../stores/app');
+    const store = useAppStore();
+    store.appState = 'SidecarBooting';
+    store.initFailReason = 'wechat_missing';
+    store.initFailDetail = '';
+    await flushPromises();
+    const text = wrapper.text();
+    expect(text).toContain('4.1.9');
+    expect(wrapper.find('.status-detail').exists()).toBe(false);
+  });
+
   it('初始化错误态（第 4 态）显示原始错误串与重装引导 + 橙灯', async () => {
     const wrapper = mountActivation();
     await setInitError();

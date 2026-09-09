@@ -237,12 +237,36 @@ def test_init_real_path_unlicensed(monkeypatch, capsys):
     assert "licensed=False" in err
 
 
-def test_init_real_path_wechat_missing(monkeypatch):
-    """授权过 + 微信未开（中英两版本兜底都抛）：failReason=wechat_missing"""
+def test_init_real_path_wechat_missing(monkeypatch, capsys):
+    """授权过 + 微信未开（中英两版本兜底都抛）：failReason=wechat_missing
+
+    failDetail 携带第二次（国际版兜底）的异常类型与消息——wechat_missing
+    判定条件过宽（微信没开/未登录/版本超区间/UIA 权限都归此），细节是
+    真机排障裁决真实根因的唯一线索（2026-09-09 真机 licensed=True +
+    wechat_missing 误报事故）。
+    """
     _install_fake_wxautox4(monkeypatch, licensed=True, wechat_ok=False)
     r = _dispatch("wx.init", {}, None)
     assert r["licensed"] is True
     assert r["failReason"] == "wechat_missing"
+    # 异常细节：类型名 + 消息（fake 抛 RuntimeError("微信窗口未找到")）
+    assert "RuntimeError" in r.get("failDetail", "")
+    assert "微信窗口未找到" in r.get("failDetail", "")
+
+
+def test_init_real_path_wechat_missing_logs_warn(monkeypatch, capsys):
+    """两次 WeChat(version=…) 失败各留一条 WARN（stderr 通道）——2026-09-09
+    真机事故的直接修复点：旧代码 except Exception 静默吞掉，日志 tab 与
+    落盘零留痕，无法裁决真实根因。"""
+    _install_fake_wxautox4(monkeypatch, licensed=True, wechat_ok=False)
+    _dispatch("wx.init", {}, None)
+    err = capsys.readouterr().err
+    assert "[SIDECAR] [WARN]" in err
+    assert "WeChat(version=微信) 失败" in err
+    assert "WeChat(version=WeChat) 失败" in err
+    # 完成行带 detail 段（排障单行可裁决）
+    assert "wx.init 完成" in err
+    assert "detail=" in err
 
 
 def test_init_real_path_systemexit_normalized(monkeypatch, capsys):
@@ -1017,6 +1041,22 @@ def test_init_mock_unlicensed_injection(monkeypatch):
         assert r2["licensed"] is True, "激活成功后 init 应翻转为已授权"
     finally:
         del os.environ["WXAUTO_MOCK_UNLICENSED"]
+        importlib.reload(methods)
+
+
+def test_init_mock_wechat_missing_injection(monkeypatch):
+    """WXAUTO_MOCK_WECHAT_MISSING=1：mock init 回微信未开三态（GUI 冒烟/
+    前端联调用，镜像 WXAUTO_MOCK_UNLICENSED 模式）"""
+    monkeypatch.setenv("WXAUTO_MOCK_WECHAT_MISSING", "1")
+    import importlib
+    importlib.reload(methods)
+    try:
+        r = _dispatch("wx.init", {}, None, mock=True)
+        assert r["licensed"] is True
+        assert r["failReason"] == "wechat_missing"
+        assert r.get("failDetail", "") != ""
+    finally:
+        del os.environ["WXAUTO_MOCK_WECHAT_MISSING"]
         importlib.reload(methods)
 
 

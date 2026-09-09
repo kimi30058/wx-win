@@ -97,14 +97,17 @@ pub fn get_app_state(ctx: State<'_, AppStateCtx>) -> String {
     }
 }
 
-/// 最近一次 init 失败原因快照（I1 兜底：init_fail 事件先于前端 listen
+/// 最近一次 init 失败快照（I1 兜底：init_fail 事件先于前端 listen
 /// 注册发出即永久丢失——tauri 事件无重放且每 sidecar 世代只发一次，
-/// 前端 init 拉本快照落 initFailReason）。None = 无失败或已成功清除。
+/// 前端 init 拉本快照落 initFailReason/initFailDetail）。None = 无失败或
+/// 已成功清除；形状 `{reason, detail}`（detail 可 null——旧 sidecar 帧缺字段）。
 /// 装配未完成时回 None（Supervisor 尚未跑 init，无失败可言）。
 /// Err 分支仅为满足 tauri「async command 带引用参数须返回 Result」约束，
 /// 实际不产生（装配失败回 Ok(None)——授权失败快照与装配失败是两域）。
 #[tauri::command]
-pub async fn get_init_fail_reason(ctx: State<'_, AppStateCtx>) -> Result<Option<String>, String> {
+pub async fn get_init_fail_reason(
+    ctx: State<'_, AppStateCtx>,
+) -> Result<Option<wxauto_desktop::state::InitFailInfo>, String> {
     match ctx.ready().await {
         Ok(a) => Ok(a.supervisor.last_init_fail().await),
         Err(_) => Ok(None),

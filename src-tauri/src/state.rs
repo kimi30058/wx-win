@@ -53,6 +53,17 @@ pub enum AppState {
     Degraded,
 }
 
+/// init 失败快照（I1 兜底数据 + get_init_fail_reason 命令载荷）：
+/// reason = 稳定枚举口径（licensed / wechat_missing / RPC 错误串），
+/// detail = wechat_missing 场景的异常细节（类型: 消息——微信没开/未登录/
+/// 版本超区间无法从 reason 区分，细节是排障裁决线索；旧 sidecar 帧缺
+/// 字段归 None）。serde camelCase 对齐前端契约。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct InitFailInfo {
+    pub reason: String,
+    pub detail: Option<String>,
+}
+
 /// 状态变化回调（GUI 模式 Task 9 注入 tauri emit；CLI/测试为 None）。
 /// 参数为 (旧态, 新态)；仅变化时触发。
 pub type StateChangeCallback = Box<dyn Fn(&AppState, &AppState) + Send + Sync>;
@@ -227,12 +238,12 @@ pub struct Supervisor {
     backoff_table: Arc<Vec<Duration>>,
     /// 事件出口（GUI 事件桥；None 时只进 WS 由 AgentLink 上报，这里跳过）
     event_sink: Option<Box<dyn Fn(Value) + Send + Sync>>,
-    /// 最近一次 init 失败原因快照（I1：init_fail 事件先于前端 listen 注册
+    /// 最近一次 init 失败快照（I1：init_fail 事件先于前端 listen 注册
     /// 发出即永久丢失——tauri 事件无重放且每 sidecar 世代只发一次，前端
     /// init 经 get_init_fail_reason 命令拉本缓存兜底；成功路径推进 WxInit
     /// 前清 None）。RPC 错误帧（Sidecar 变体）也写——sidecar 活着、wx 层
     /// 可诊断（ADR-0011）；transport 级失败不写。
-    last_init_fail: RwLock<Option<String>>,
+    last_init_fail: RwLock<Option<InitFailInfo>>,
     /// 诊断：当前所处阶段（测试 / 排障插桩用）
     phase: RwLock<&'static str>,
 }
@@ -260,9 +271,9 @@ impl Supervisor {
         self.phase.read().await.to_string()
     }
 
-    /// 最近一次 init 失败原因快照（I1：get_init_fail_reason 命令数据源；
+    /// 最近一次 init 失败快照（I1：get_init_fail_reason 命令数据源；
     /// None = 无失败记录或已随成功路径清除）
-    pub async fn last_init_fail(&self) -> Option<String> {
+    pub async fn last_init_fail(&self) -> Option<InitFailInfo> {
         self.last_init_fail.read().await.clone()
     }
 
@@ -369,7 +380,10 @@ impl Supervisor {
                 // 显示真实原因。区别于 transport 级失败（下分支）。
                 let reason = format!("初始化失败：sidecar 错误: {msg}");
                 tracing::warn!(%reason, "wx.init RPC 错误帧");
-                *self.last_init_fail.write().await = Some(reason.clone());
+                *self.last_init_fail.write().await = Some(InitFailInfo {
+                    reason: reason.clone(),
+                    detail: None, // 错误消息已嵌 reason，不双写
+                });
                 self.emit(serde_json::json!({
                     "kind": "event", "type": "init_fail",
                     "data": {"reason": reason},
@@ -388,6 +402,10 @@ impl Supervisor {
             .as_ref()
             .and_then(|v| v["failReason"].as_str())
             .map(str::to_string);
+        let fail_detail = init
+            .as_ref()
+            .and_then(|v| v["failDetail"].as_str())
+            .map(str::to_string);
         if !licensed || fail_reason.is_some() {
             // 未授权缺 failReason（旧 sidecar）也归一为 licensed——引导口径一致
             let reason = fail_reason.unwrap_or_else(|| "licensed".to_string());
@@ -396,10 +414,13 @@ impl Supervisor {
             // 即永久丢失（无重放），get_init_fail_reason 命令从本缓存兜底。
             // 仅 RPC 成功（init.is_some）才写：sidecar 死亡不谎报授权失败。
             if init.is_some() {
-                *self.last_init_fail.write().await = Some(reason.clone());
+                *self.last_init_fail.write().await = Some(InitFailInfo {
+                    reason: reason.clone(),
+                    detail: fail_detail.clone(),
+                });
                 self.emit(serde_json::json!({
                     "kind": "event", "type": "init_fail",
-                    "data": {"reason": reason},
+                    "data": {"reason": reason, "detail": fail_detail},
                 }))
                 .await;
             }

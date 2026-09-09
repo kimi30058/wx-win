@@ -110,10 +110,7 @@ impl UiEventBridge {
                 self.emit(EVENT_STATUS, &payload).await;
             }
             "init_fail" => {
-                // init 未就绪原因（licensed / wechat_missing）——激活页与横幅数据源
-                let payload = serde_json::json!({
-                    "reason": frame["data"]["reason"].as_str().unwrap_or_default(),
-                });
+                let payload = init_fail_payload(frame);
                 self.emit(EVENT_INIT_FAIL, &payload).await;
             }
             // friend_request 等其余事件：前端无订阅（Listen 页主动 invoke 拉取），
@@ -133,6 +130,16 @@ impl UiEventBridge {
     pub async fn forward_app_log(&self, entry: &Value) {
         self.emit(EVENT_APP_LOG, entry).await;
     }
+}
+
+/// init_fail 帧组装前端载荷：reason（licensed / wechat_missing / RPC 错误串）
+/// 与 detail（wechat_missing 场景的异常细节；缺字段归空串——前端按空串
+/// 判定不显示细节行，2026-09-09 wechat_missing 误报修复）两键。
+pub fn init_fail_payload(frame: &Value) -> Value {
+    serde_json::json!({
+        "reason": frame["data"]["reason"].as_str().unwrap_or_default(),
+        "detail": frame["data"]["detail"].as_str().unwrap_or_default(),
+    })
 }
 
 /// AppState → 变体名（与前端 AppStateName 六值精确一致）
@@ -197,6 +204,25 @@ mod tests {
                 "data": {"reason": "licensed"}, "wsConnected": false,
             }))
             .await;
+    }
+
+    /// init_fail 载荷组装：detail 原样透传、缺字段归空串（前端按空串判定
+    /// 不显示细节行，2026-09-09 wechat_missing 误报修复）
+    #[test]
+    fn test_init_fail_payload_includes_detail() {
+        let out = init_fail_payload(&serde_json::json!({
+            "kind": "event", "type": "init_fail",
+            "data": {"reason": "wechat_missing", "detail": "RuntimeError: 微信窗口未找到"},
+        }));
+        assert_eq!(out["reason"], "wechat_missing");
+        assert_eq!(out["detail"], "RuntimeError: 微信窗口未找到");
+        // 缺 detail（旧 sidecar 帧 / licensed 帧）→ 空串而非 null（前端守卫简单）
+        let old = init_fail_payload(&serde_json::json!({
+            "kind": "event", "type": "init_fail",
+            "data": {"reason": "licensed"},
+        }));
+        assert_eq!(old["reason"], "licensed");
+        assert_eq!(old["detail"], "");
     }
 
     /// app-log 转发：entry JSON 经桥发射（payload 结构即前端契约）

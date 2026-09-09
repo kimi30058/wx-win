@@ -41,6 +41,11 @@ pub struct InitResult {
     /// rename 对齐 Python 侧 camelCase（serde 默认蛇形会错位成 fail_reason）
     #[serde(default, rename = "failReason")]
     pub fail_reason: Option<String>,
+    /// wechat_missing 场景的异常细节（类型: 消息，2026-09-09 误报修复）：
+    /// 判定条件无法区分微信没开/未登录/版本超区间，细节是排障裁决线索；
+    /// 成功帧与 licensed 帧无此字段——default None 向后兼容
+    #[serde(default, rename = "failDetail")]
+    pub fail_detail: Option<String>,
 }
 
 /// message.received 通知 / chat.history 结果中的原始消息结构（spec §3.2 RawMessage）
@@ -119,5 +124,26 @@ mod tests {
         }))
         .expect("旧包反序列化失败");
         assert_eq!(old.fail_reason, None);
+    }
+
+    /// InitResult failDetail 契约（2026-09-09 wechat_missing 误报修复）：
+    /// camelCase rename 对齐 Python 侧 failDetail；缺字段 default None。
+    #[test]
+    fn test_init_result_fail_detail_serde() {
+        let v: InitResult = serde_json::from_value(serde_json::json!({
+            "licensed": true, "wxid": "", "nickname": "",
+            "failReason": "wechat_missing", "failDetail": "RuntimeError: 微信窗口未找到"
+        }))
+        .expect("反序列化失败");
+        assert_eq!(
+            v.fail_detail.as_deref(),
+            Some("RuntimeError: 微信窗口未找到")
+        );
+        // 无 failDetail（成功帧 / licensed 帧）→ None
+        let old: InitResult = serde_json::from_value(serde_json::json!({
+            "licensed": false, "wxid": "", "nickname": "", "failReason": "licensed"
+        }))
+        .expect("反序列化失败");
+        assert_eq!(old.fail_detail, None);
     }
 }

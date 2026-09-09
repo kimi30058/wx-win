@@ -27,7 +27,8 @@ for line in sys.stdin:
     print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": out}), flush=True)
 "#;
 
-/// 微信未开剧本：licensed=true + failReason=wechat_missing
+/// 微信未开剧本：licensed=true + failReason=wechat_missing + failDetail
+/// （2026-09-09 误报修复：detail 携带异常类型与消息，排障裁决真实根因）
 const WECHAT_MISSING_SCRIPT: &str = r#"
 import sys, json
 for line in sys.stdin:
@@ -35,7 +36,7 @@ for line in sys.stdin:
     if not line: continue
     req = json.loads(line)
     if req.get("method") == "wx.init":
-        out = {"licensed": True, "wxid": "", "nickname": "", "failReason": "wechat_missing"}
+        out = {"licensed": True, "wxid": "", "nickname": "", "failReason": "wechat_missing", "failDetail": "RuntimeError: 微信窗口未找到"}
     elif req.get("method") == "wx.is_online":
         out = {"online": True}
     else:
@@ -128,6 +129,18 @@ async fn wechat_missing_init_stays_booting_with_reason() {
         hit,
         "应收 init_fail 帧 reason=wechat_missing，实收: {frames:?}"
     );
+    // detail 透传：init_fail 帧 data.detail 携带异常细节（前端激活页显示）
+    let hit_detail = frames.iter().any(|f| {
+        f["type"] == "init_fail"
+            && f["data"]["detail"]
+                .as_str()
+                .unwrap_or("")
+                .contains("RuntimeError")
+    });
+    assert!(
+        hit_detail,
+        "应收 init_fail 帧 data.detail 含异常细节, 实收: {frames:?}"
+    );
 }
 
 #[tokio::test]
@@ -146,11 +159,14 @@ async fn ready_script_retry_init_reaches_ready() {
 async fn last_init_fail_caches_unlicensed_reason() {
     let (sup, _state, _events) = make_supervisor(UNLICENSED_SCRIPT).await;
     sup.retry_init().await;
+    let snap = sup.last_init_fail().await;
     assert_eq!(
-        sup.last_init_fail().await.as_deref(),
+        snap.as_ref().map(|s| s.reason.as_str()),
         Some("licensed"),
         "未授权 init 后应缓存 reason=licensed 供前端快照兜底"
     );
+    // licensed 帧（无 failDetail）→ detail None
+    assert_eq!(snap.as_ref().and_then(|s| s.detail.clone()), None);
 }
 
 /// 微信未开剧本同样缓存 wechat_missing
@@ -158,9 +174,16 @@ async fn last_init_fail_caches_unlicensed_reason() {
 async fn last_init_fail_caches_wechat_missing_reason() {
     let (sup, _state, _events) = make_supervisor(WECHAT_MISSING_SCRIPT).await;
     sup.retry_init().await;
+    let snap = sup.last_init_fail().await;
     assert_eq!(
-        sup.last_init_fail().await.as_deref(),
+        snap.as_ref().map(|s| s.reason.as_str()),
         Some("wechat_missing")
+    );
+    // detail 同入快照（get_init_fail_reason 命令数据源，前端激活页显示）
+    assert_eq!(
+        snap.as_ref().and_then(|s| s.detail.as_deref()),
+        Some("RuntimeError: 微信窗口未找到"),
+        "快照应含 failDetail, 实得: {snap:?}"
     );
 }
 
@@ -175,6 +198,27 @@ async fn last_init_fail_cleared_on_success() {
         sup.last_init_fail().await,
         None,
         "授权通过（推进 WxInit 前）应清空 last_init_fail"
+    );
+}
+
+/// 旧 sidecar 帧（无 failDetail）向后兼容：reason 正常缓存、detail None
+#[tokio::test]
+async fn last_init_fail_tolerates_missing_detail_field() {
+    // 剧本只回 failReason，模拟旧 sidecar 二进制
+    let script =
+        WECHAT_MISSING_SCRIPT.replace(", \"failDetail\": \"RuntimeError: 微信窗口未找到\"", "");
+    let (sup, _state, _events) = make_supervisor(&script).await;
+    sup.retry_init().await;
+    let snap = sup.last_init_fail().await;
+    assert_eq!(
+        snap.as_ref().map(|s| s.reason.as_str()),
+        Some("wechat_missing"),
+        "无 failDetail 帧的 reason 应正常缓存"
+    );
+    assert_eq!(
+        snap.as_ref().and_then(|s| s.detail.clone()),
+        None,
+        "缺字段归 None 而非空串"
     );
 }
 
@@ -218,16 +262,14 @@ async fn rpc_error_frame_writes_snapshot_and_emits_init_fail() {
         "init 报错保持 Booting"
     );
     let snap = sup.last_init_fail().await;
+    let snap_reason = snap.as_ref().map(|s| s.reason.as_str()).unwrap_or("");
     assert!(
-        snap.as_deref()
-            .unwrap_or("")
-            .contains("ModuleNotFoundError"),
+        snap_reason.contains("ModuleNotFoundError"),
         "快照应含真实错误, 实得: {snap:?}"
     );
-    assert!(
-        snap.as_deref().unwrap_or("").starts_with("初始化失败："),
-        "格式约定前缀"
-    );
+    assert!(snap_reason.starts_with("初始化失败："), "格式约定前缀");
+    // RPC 错误分支 detail=None（错误消息已嵌 reason，不双写）
+    assert_eq!(snap.as_ref().and_then(|s| s.detail.clone()), None);
     let frames = events.lock().unwrap();
     let hit = frames.iter().any(|f| {
         f["type"] == "init_fail"
