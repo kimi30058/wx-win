@@ -104,16 +104,34 @@ impl SidecarHandle {
     pub async fn spawn_default_sunk(
         stderr_sink: Option<Arc<dyn StderrSink>>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        // bootstrap 自检报告（spec §6）：探测链各级结果留痕到
+        // logs/bootstrap.log（覆盖写，一次启动一份）。报告路径拿不到
+        // （home 缺失）则整体跳过——诊断通道永不阻断启动
+        let report = crate::bootstrap::log_path();
+        if let Some(p) = &report {
+            crate::bootstrap::start_report(p);
+        }
+        let probe = |msg: String| {
+            if let Some(p) = &report {
+                crate::bootstrap::probe_line(p, &msg);
+            }
+        };
         let mut cmd = if let Ok(cmd_str) = std::env::var("WXAUTO_SIDECAR_CMD") {
             let (program, args) = crate::cli::parse_sidecar_cmd(&cmd_str);
+            probe(format!("env WXAUTO_SIDECAR_CMD 命中: {program}"));
             let mut c = Command::new(program);
             c.args(args);
             c
         } else if let Some(bundled) = crate::cli::find_bundled_sidecar() {
+            probe(format!("bundled 命中: {bundled}"));
             let c = Command::new(&bundled);
             tracing::info!(path = %bundled, "使用内置 sidecar（安装态）");
             c
         } else {
+            probe(format!(
+                "⚠ 回退 python3——bundled 候选 {:?} 均不存在, 安装可能不完整",
+                crate::cli::BUNDLED_SIDECAR_NAMES
+            ));
             let mut c = Command::new("python3");
             c.arg("sidecar-python/sidecar.py");
             if let Some(root) = crate::cli::resolve_sidecar_workdir() {
@@ -125,7 +143,12 @@ impl SidecarHandle {
         // 双保险：Windows GUI 父进程下任何控制台闪窗都不允许
         apply_windows_no_window(&mut cmd);
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
-        Self::do_spawn(cmd, stderr_sink).await
+        let spawn_res = Self::do_spawn(cmd, stderr_sink).await;
+        match &spawn_res {
+            Ok(h) => probe(format!("spawn 完成 PID={}", h.pid)),
+            Err(e) => probe(format!("spawn 失败: {e}")),
+        }
+        spawn_res
     }
 
     /// 实际 spawn：取管道、建共享态、挂读循环 + 退出 reaper。

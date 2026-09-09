@@ -175,6 +175,9 @@ pnpm tauri build
      安装包自带 sidecar, §6 手工接线作废
   8. PyInstaller one-file 模式启动稍慢（自解压到 temp, 约 1~3s）——
      换 onedir 可提速但分发变目录, 当前取舍保持 one-file
+  9. 2026-09-09 真机日志 07:05:12「GUI 装配完成/使用内置 sidecar」双行
+     重复——快照重叠既有 follow-up（AppLog 快照与事件短暂重叠）,
+     另行处置, 不在 sidecar/日志链路修
   完整 12 条见 .superpowers ledger 与 memory/wxauto-desktop-app-impl.md
 
 
@@ -193,7 +196,12 @@ pnpm tauri build
   wx.init 返回授权失败                → wxautox4 未授权或授权机器不符, 先跑 §8-B-1
   连上网关但指令全部超时              → 服务端指令超时 60s 无并发上限, 批量慢指令
                                         会拖死后段; 设备端是串行队列, 属已知行为
-  装完双击没反应                      → 看 %USERPROFILE%\.wxauto-desktop\ 日志;
+  装完双击没反应                      → 看 %USERPROFILE%\.wxauto-desktop\logs\:
+                                        app-YYYYMMDD.log（运行日志, 按天分文件,
+                                        保留 7 天, rust+sidecar 双来源）
+                                        bootstrap.log（启动探测链自检, 最近一次
+                                        启动——sidecar 是内置/env/回退 python3
+                                        哪条路、PID、spawn 成败一行可判）;
                                         WebView2 未装（Win10 老版本）
 ================================================================================
 

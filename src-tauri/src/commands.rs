@@ -142,7 +142,13 @@ pub async fn activate_license(ctx: State<'_, AppStateCtx>, code: String) -> Resu
         .session
         .direct_call_with_timeout(methods::ACTIVATE, json!({ "code": code }), ACTIVATE_TIMEOUT)
         .await
-        .map_err(|e| format!("激活请求失败：{e}"))?;
+        .map_err(|e| {
+            // 失败补日志（spec §6）：错误目前只 reject 给前端，日志侧
+            // 无痕——排障须在 app-*.log 留 activate 失败原因
+            let msg = format!("激活请求失败：{e}");
+            tracing::error!(%msg, "activate_license 命令失败");
+            msg
+        })?;
     if result["ok"].as_bool().unwrap_or(false) {
         assembled.supervisor.retry_init().await;
     }
