@@ -555,7 +555,9 @@ impl TransportHandler for LinkHandler {
         }
     }
     fn on_disconnect(&self, reason: String) {
-        tracing::warn!(%reason, "WS 断开");
+        // reason 并入 message 正文——GUI 运行日志只渲染 message 字段，
+        // 结构化字段在前端不可见（生产 4001 排障时 reason 全被吞）
+        tracing::warn!("WS 断开: {reason}");
         // GUI 桥：连接态复位 + 补发 status（前端「服务器连接」灯数据源；
         // 补发的是 event_sink 侧的 status 事件——断开后 WS 不可达，只走桥）
         self.link.ws_connected.store(false, Ordering::Release);

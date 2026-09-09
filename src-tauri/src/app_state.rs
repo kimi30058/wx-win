@@ -198,7 +198,10 @@ for line in sys.stdin:
         let cfg_server = self.config.read().await.server_url.clone();
         let server = std::env::var("WXAUTO_SERVER_URL").unwrap_or(cfg_server);
         let token = match std::env::var("WXAUTO_DEVICE_TOKEN") {
-            Ok(t) => t,
+            Ok(t) => {
+                tracing::warn!("token 来自环境变量 WXAUTO_DEVICE_TOKEN（覆盖 keyring）");
+                t
+            }
             Err(_) => match tokio::task::spawn_blocking(config::keyring_get_token).await {
                 Ok(Ok(t)) if !t.is_empty() => t,
                 Ok(Ok(_)) => {
@@ -215,6 +218,11 @@ for line in sys.stdin:
                 }
             },
         };
+        // 组装结果留痕（token 遮罩——日志会被截图分享，不得泄漏可用整串；
+        // 头 12 字符足以辨认「token= 前缀污染/空值/截断」等形状问题）。
+        // 关键值并入 message 正文：GUI 运行日志只渲染 message 字段
+        let masked = wxauto_desktop::cli::mask_token(&token);
+        tracing::info!("WS 连接参数组装: server={server} token={masked}");
         build_ws_url(&server, &token)
     }
 
@@ -450,6 +458,11 @@ impl AppStateCtx {
         let assembled = self.ready().await?;
         if let Some(tok) = token {
             if !tok.is_empty() {
+                // 保存详情留痕（遮罩同 build_url）：排障时对齐「用户到底存了什么」
+                tracing::info!(
+                    "保存设置：写入设备 token 到 keyring: {}",
+                    wxauto_desktop::cli::mask_token(&tok)
+                );
                 keyring_set_token_async(tok).await?;
             }
         }

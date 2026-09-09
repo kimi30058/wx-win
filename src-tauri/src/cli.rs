@@ -132,6 +132,22 @@ pub fn build_ws_url(server: &str, token: &str) -> String {
     }
 }
 
+/// token 日志遮罩：保留头 12 + 尾 4 + 总长（形如 `eyJhbGciOiJI…abcd (len=210)`）。
+/// 头部可辨认「token= 前缀污染 / BOM / 明显异形」，长度可诊断「截断 / 空」，
+/// 中段全遮——日志会被截图分享，不得泄漏可用整串。<16 字符全遮。
+pub fn mask_token(token: &str) -> String {
+    if token.is_empty() {
+        return "<空>".into();
+    }
+    let n = token.chars().count();
+    if n < 16 {
+        return format!("<len={n} 全遮>");
+    }
+    let head: String = token.chars().take(12).collect();
+    let tail: String = token.chars().skip(n.saturating_sub(4)).collect();
+    format!("{head}…{tail} (len={n})")
+}
+
 /// 等 Ctrl-C（测试与注入场景；返回 () 而非 Result——信号等待无业务失败态）
 pub async fn wait_for_sigint() {
     let _ = tokio::signal::ctrl_c().await;
@@ -164,6 +180,25 @@ mod tests {
             build_ws_url("ws://127.0.0.1:60021", ""),
             "ws://127.0.0.1:60021"
         );
+    }
+
+    /// token 遮罩：日志里可辨识形状（前 12 后 4 + 长度）但不泄漏可用了
+    /// 整串——足以诊断「空值 / token= 前缀污染 / 截断 / 明显异形」。
+    #[test]
+    fn test_mask_token() {
+        // 常规 JWT 形状：头 12 + 尾 4 + 长度
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJjaGFubmVsSWQiOiJ0In0.sig";
+        let m = mask_token(jwt);
+        assert!(m.starts_with("eyJhbGciOiJI"), "应保留头 12 字符: {m}");
+        assert!(m.contains("….sig"), "应保留尾 4 字符: {m}");
+        assert!(m.contains("len=48"), "应含长度: {m}");
+        assert!(!m.contains(jwt), "不得泄漏完整 token");
+        // 短 token：全遮
+        assert_eq!(mask_token("abc"), "<len=3 全遮>");
+        assert_eq!(mask_token(""), "<空>");
+        // 常见污染形态可见：token= 前缀在遮罩串中可辨认
+        let dirty = "token=eyJhbGciOiJIUzI1NiJ9.payload.sig";
+        assert!(mask_token(dirty).starts_with("token=eyJhbG"), "前缀污染应可辨认: {}", mask_token(dirty));
     }
 
     /// 引号包裹的含空格路径不被拆坏（follow-up #2 回归）

@@ -81,9 +81,24 @@ impl DeviceTransport for WsTransport {
                                     }
                                 }
                                 Some(Ok(Message::Close(c))) => {
+                                    // close code 是排障第一线索（4001=token 无效/
+                                    // 4002=心跳超时/1006=异常断开），必须进日志；
+                                    // code/reason 并入 message 正文——GUI 运行日志
+                                    // 只渲染 message 字段，结构化字段前端不可见
                                     let reason = c
-                                        .map(|f| f.reason.into_owned())
-                                        .unwrap_or_else(|| "服务端关闭".into());
+                                        .map(|f| {
+                                            let s = format!(
+                                                "服务端关闭[code={}]: {}",
+                                                u16::from(f.code),
+                                                f.reason
+                                            );
+                                            tracing::warn!("收到 Close 帧: {s}");
+                                            s
+                                        })
+                                        .unwrap_or_else(|| {
+                                            tracing::warn!("收到 Close 帧: 服务端关闭[1005]: 无理由");
+                                            "服务端关闭[1005]: 无理由".into()
+                                        });
                                     handler.on_disconnect(reason);
                                     break;
                                 }
