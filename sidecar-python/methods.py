@@ -18,8 +18,9 @@ import sidecar 会加载第二份模块实例，回写落空，真实模式下�
 spec.rs RawMessage 严格对齐；camelCase 的 WS 帧转换在 Rust agent_link 层做。
 """
 import os
-import sys
 import time
+
+import sidecar_log  # noqa: E402 — 同目录；日志走 stderr（stdout 铁律专用 JSON-RPC）
 
 
 class SidecarError(Exception):
@@ -147,6 +148,7 @@ def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
             return {"licensed": False, "wxid": "", "nickname": "", "failReason": "licensed"}
         return {"licensed": True, "wxid": "mock_wx", "nickname": "模拟设备"}
     # 真实导入（仅 Windows + 已 pip install wxautox4 时可达）
+    sidecar_log.log("INFO", "wx.init 开始（真实模式）")
     from wxautox4 import WeChat, WxParam  # noqa: PLC0415 — 延迟导入是硬要求（Linux 无此库）
     from wxautox4.utils.useful import check_license  # noqa: PLC0415
 
@@ -175,6 +177,7 @@ def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
     }
     if fail_reason:
         result["failReason"] = fail_reason
+    sidecar_log.log("INFO", f"wx.init 完成: licensed={_license_ok} failReason={fail_reason}")
     return result
 
 
@@ -196,15 +199,19 @@ def _activate(params, wx, msg_pool, msg_pool_ts, notify, mock):
             "message": "模拟激活成功" if ok else "激活失败：激活码无效或已过期",
         }
     # 真实导入（仅 Windows + 已 pip install wxautox4 时可达）
+    sidecar_log.log("INFO", "wx.activate 开始（真实模式）")
     from wxautox4.utils.useful import authenticate  # noqa: PLC0415 — 延迟导入是硬要求
 
     if not authenticate(code):
+        sidecar_log.log("WARN", "wx.activate 失败：激活码无效或已过期")
         return {"ok": False, "message": "激活失败：激活码无效或已过期"}
     # 回查确认：authenticate 过但状态未生效的极端情况不静默吞
     from wxautox4.utils.useful import check_license  # noqa: PLC0415
 
     if not check_license():
+        sidecar_log.log("WARN", "wx.activate：码已接受但授权未生效")
         return {"ok": False, "message": "激活码已接受但授权状态未生效，请重启应用"}
+    sidecar_log.log("INFO", "wx.activate 成功")
     return {"ok": True, "message": "激活成功"}
 
 
@@ -277,7 +284,7 @@ def _msg_quote(params, wx, msg_pool, msg_pool_ts, notify, mock):
         if was_send_success(r):
             return {"ok": True}
     except Exception as e:  # noqa: BLE001 — UIA 异常与失败形态同样降级
-        print(f"[sidecar] quote 失败({e})，降级普通发送", file=sys.stderr)
+        sidecar_log.log("WARN", f"quote 失败({e})，降级普通发送")
     # 降级：普通发送（wx.SendMsg 全局路径，附录 A）
     # 降级目标：显式 who 优先；msgId 路径（spec §3.2 签名无 who）取入池时
     # 附带的 chat_who；两者皆无则明确报错而非 KeyError（审查 C1）
@@ -388,7 +395,7 @@ def _listen_add(params, wx, msg_pool, msg_pool_ts, notify, mock):
             _pool_put(msg_pool, msg_pool_ts, mid, msg, str(getattr(chat, "who", "")))
             notify("message.received", _raw_message(msg, chat, mid))
         except Exception as e:  # noqa: BLE001 — 回调内异常上抛会杀 wxautox4 监听线程
-            print(f"[sidecar] message.received 回调异常: {e}", file=sys.stderr)
+            sidecar_log.log("ERROR", f"message.received 回调异常: {e}")
 
     for _attempt in range(3):
         time.sleep(0.5)
@@ -508,7 +515,7 @@ def _voice_to_text(params, wx, msg_pool, msg_pool_ts, notify, mock):
     try:
         return {"text": str(msg.to_text())}
     except Exception as e:  # noqa: BLE001 — 转写失败降级（spec §2.4：WARNING 不中断）
-        print(f"[sidecar] 语音转写失败: {e}", file=sys.stderr)
+        sidecar_log.log("WARN", f"语音转写失败: {e}")
         return {"text": "", "failed": True}
 
 

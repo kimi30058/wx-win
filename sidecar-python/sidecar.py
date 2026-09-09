@@ -25,6 +25,7 @@ for _stream in (sys.stdout,):
 # 历史上 sidecar.SidecarError 与 methods.SidecarError 同名不同源，导致
 # except 永不命中、业务错误全落 -32603（审查 C1）。
 import methods  # noqa: E402 — 顶部导入保证 except methods.SidecarError 可解析
+import sidecar_log  # noqa: E402 — 同目录；日志走 stderr（stdout 铁律专用 JSON-RPC）
 
 MOCK = os.environ.get("WXAUTO_MOCK", "") == "1"
 
@@ -134,6 +135,7 @@ def main():
             # 本文件顶部的 SidecarError 类与之同名不同源，捕获它永不命中）
             _error(req["id"], -32000, str(e))
         except Exception as e:  # noqa: BLE001 — sidecar 边界统一转 error 帧
+            sidecar_log.log("ERROR", f"dispatch {req.get('method', '?')} 失败: {type(e).__name__}: {e}")
             _error(req["id"], -32603, f"{type(e).__name__}: {e}")
 
 
