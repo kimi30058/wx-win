@@ -192,17 +192,28 @@ for line in sys.stdin:
 
     /// 组装 WS URL：serverUrl（env 覆盖 > 配置）+ keyring token（env 覆盖）。
     /// keyring 读取走 spawn_blocking（同步 dbus IO）。
+    /// 读失败/无 token 必留痕（warn）——静默空 token 连接会恒 4001，
+    /// 排障时日志里必须能看到「为什么没带 token」（生产 4001 事故教训）。
     pub async fn build_url(&self) -> String {
         let cfg_server = self.config.read().await.server_url.clone();
         let server = std::env::var("WXAUTO_SERVER_URL").unwrap_or(cfg_server);
         let token = match std::env::var("WXAUTO_DEVICE_TOKEN") {
             Ok(t) => t,
-            Err(_) => tokio::task::spawn_blocking(config::keyring_get_token)
-                .await
-                .map_err(|e| format!("keyring 任务 Join 失败: {e}"))
-                .ok()
-                .and_then(|r| r.ok())
-                .unwrap_or_default(),
+            Err(_) => match tokio::task::spawn_blocking(config::keyring_get_token).await {
+                Ok(Ok(t)) if !t.is_empty() => t,
+                Ok(Ok(_)) => {
+                    tracing::warn!("keyring 中 token 为空——将以无鉴权方式连接（预期服务端 4001，请先在设置页填入设备 token）");
+                    String::new()
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("keyring 读取 token 失败，将以无鉴权方式连接（预期 4001）: {e}");
+                    String::new()
+                }
+                Err(e) => {
+                    tracing::warn!("keyring 任务 Join 失败，将以无鉴权方式连接（预期 4001）: {e}");
+                    String::new()
+                }
+            },
         };
         build_ws_url(&server, &token)
     }
@@ -285,6 +296,19 @@ for line in sys.stdin:
     /// 六态快照名（get_app_state 命令数据源；同步读——低开销查询）
     pub fn state_snapshot(&self) -> String {
         crate::ui_events::app_state_name(&self.state_machine.state_sync()).to_string()
+    }
+
+    /// 设置热重载（生产 4001 恒失败根因修复）：WsTransport 构造时固化
+    /// URL，重连循环永不重读 keyring/config——保存设置（token/serverUrl）
+    /// 后若不重建 link，设备永远拿旧 URL 重试。此处 link 运行中时以
+    /// 新配置重建（复用 start_link：halt 旧 + build_url 重读 + 换新）。
+    /// 槽空（未连接）= no-op 返回 false——尊重用户未连接的显式状态。
+    pub async fn reload_link_if_running(&self) -> Result<bool, String> {
+        if slot_read(&self.link).is_none() {
+            return Ok(false);
+        }
+        self.start_link().await?;
+        Ok(true)
     }
 }
 
@@ -413,8 +437,11 @@ impl AppStateCtx {
         self.inner.get().and_then(|r| r.clone().ok())
     }
 
-    /// 保存设置：按字段合并 → 落盘（token 非空先写 keyring）。
-    /// 合并而非替换——listenNames/delayMinMs/delayMaxMs 保持存量。
+    /// 保存设置：按字段合并 → 落盘（token 非空先写 keyring）→ link 运行中
+    /// 则热重载（WsTransport URL 构造时固化，不重建则新 token 永不生效——
+    /// 生产 4001 恒失败根因）。合并而非替换——listenNames/delayMinMs/delayMaxMs
+    /// 保持存量。热重载失败不让保存整体报错（配置已落盘，重连靠用户手点/
+    /// 下次启动），只留错误日志。
     pub async fn save_settings(
         &self,
         patch: SettingsPatch,
@@ -426,11 +453,19 @@ impl AppStateCtx {
                 keyring_set_token_async(tok).await?;
             }
         }
-        let mut cfg = assembled.config.write().await;
-        cfg.server_url = patch.server_url;
-        cfg.channel_id = patch.channel_id;
-        cfg.auto_connect = patch.auto_connect;
-        config::save_config(&self.config_path, &cfg)
+        {
+            let mut cfg = assembled.config.write().await;
+            cfg.server_url = patch.server_url;
+            cfg.channel_id = patch.channel_id;
+            cfg.auto_connect = patch.auto_connect;
+            config::save_config(&self.config_path, &cfg)?;
+        }
+        // 落盘成功后热重载（原配置读写锁在 start_link 的 build_url 里还要读，
+        // 先释放写锁防死锁）
+        if let Err(e) = assembled.reload_link_if_running().await {
+            tracing::error!("设置已保存但热重载连接失败（下次连接/重启生效）: {e}");
+        }
+        Ok(())
     }
 }
 
@@ -553,6 +588,61 @@ mod tests {
             slot_read(&a.link).is_none(),
             "disconnect 后槽应清空（孤儿 link 不残留）"
         );
+    }
+
+    /// 设置热生效回归（生产 4001 恒失败根因）：WsTransport 构造时固化
+    /// URL，重连循环永不重读 keyring/config——保存设置后若不重建 link，
+    /// 设备永远拿旧 URL（无 token）重试。reload_link_if_running 在
+    /// link 运行中时必须以新配置重建：新连接打到新地址。
+    #[tokio::test]
+    async fn test_reload_link_if_running_rebuilds_with_new_url() {
+        use tokio_tungstenite::tungstenite::Message;
+        use futures_util::{SinkExt, StreamExt};
+        use std::time::Duration;
+
+        // 双 mock server：各收一条连接（hello）即记录并关闭
+        async fn spawn_echo_server() -> (std::net::SocketAddr, tokio::sync::mpsc::Receiver<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tokio::spawn(async move {
+                if let Ok((stream, _)) = listener.accept().await {
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let _ = ws.next().await; // hello
+                    let _ = ws.send(Message::Close(None)).await;
+                    let _ = tx.send(()).await;
+                }
+            });
+            (addr, rx)
+        }
+
+        let (addr1, mut rx1) = spawn_echo_server().await;
+        let (addr2, mut rx2) = spawn_echo_server().await;
+
+        let a = Assembled::for_test(format!("ws://{addr1}"))
+            .await
+            .expect("测试装配失败");
+        a.start_link().await.expect("首次 connect 应成功");
+        tokio::time::timeout(Duration::from_secs(10), rx1.recv())
+            .await
+            .expect("server1 应收到首连")
+            .expect("server1 通道不应关闭");
+
+        // 模拟保存设置：改 server_url 后热重载
+        a.config.write().await.server_url = format!("ws://{addr2}");
+        let reloaded = a.reload_link_if_running().await.expect("热重载应成功");
+        assert!(reloaded, "link 运行中应触发重建");
+
+        // 新连接必须打到 server2（修复前：旧 transport 持旧 URL 死循环重连 server1）
+        tokio::time::timeout(Duration::from_secs(10), rx2.recv())
+            .await
+            .expect("热重载后新连接应打到新地址（当前实现未重建——URL 固化根因）")
+            .expect("server2 通道不应关闭");
+
+        // 未连接时热重载是 no-op（不应报错、不应建连）
+        a.stop_link().await.expect("disconnect 应成功");
+        let reloaded2 = a.reload_link_if_running().await.expect("未连接时应 Ok");
+        assert!(!reloaded2, "未连接时不应触发重建");
     }
 
     /// 必修 5 回归：主动 disconnect（stop_link）后，桥应转发一帧
