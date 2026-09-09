@@ -213,20 +213,28 @@ def _reset_init_globals(monkeypatch):
     yield
 
 
-def test_init_real_path_licensed_ok(monkeypatch):
+def test_init_real_path_licensed_ok(monkeypatch, capsys):
     """授权过 + 微信在：无 failReason 字段"""
     _install_fake_wxautox4(monkeypatch, licensed=True, wechat_ok=True)
     r = _dispatch("wx.init", {}, None)
     assert r["licensed"] is True
     assert "failReason" not in r
+    # 埋点断言（spec §6）：real-path 路径必须打 wx.init 完成日志（stderr 通道）
+    err = capsys.readouterr().err
+    assert "wx.init 完成" in err
+    assert "[SIDECAR]" in err
 
 
-def test_init_real_path_unlicensed(monkeypatch):
+def test_init_real_path_unlicensed(monkeypatch, capsys):
     """未授权：failReason=licensed（WeChat 同失败也不改口径——授权是可行动根因）"""
     _install_fake_wxautox4(monkeypatch, licensed=False, wechat_ok=False)
     r = _dispatch("wx.init", {}, None)
     assert r["licensed"] is False
     assert r["failReason"] == "licensed"
+    # 埋点断言（spec §6）：完成行须带 licensed=False 口径
+    err = capsys.readouterr().err
+    assert "wx.init 完成" in err
+    assert "licensed=False" in err
 
 
 def test_init_real_path_wechat_missing(monkeypatch):
@@ -894,11 +902,15 @@ def test_activate_success_roundtrip(monkeypatch):
     assert r["message"] == "激活成功"
 
 
-def test_activate_invalid_code(monkeypatch):
+def test_activate_invalid_code(monkeypatch, capsys):
     _install_fake_wxautox4(monkeypatch, licensed=False, authenticate_result=False)
     r = _dispatch("wx.activate", {"code": "BAD"}, None)
     assert r["ok"] is False
     assert "无效" in r["message"]
+    # 埋点断言（spec §6）：real-path 激活失败须打 WARN 日志（stderr 通道）
+    err = capsys.readouterr().err
+    assert "wx.activate 失败：激活码无效或已过期" in err
+    assert "[SIDECAR]" in err
 
 
 def test_activate_accepted_but_not_effective(monkeypatch):

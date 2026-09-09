@@ -9,17 +9,23 @@ import os
 import sys
 import threading
 
-# stdout 强制 UTF-8：Windows 默认代码页（GBK 等）下 ensure_ascii=False 的
-# 中文 JSON 帧会 UnicodeEncodeError（PyInstaller 冻结后在中文 Windows 上
-# 同样命中——Rust 侧按 UTF-8 字节读，两端必须一致）。stderr 不动（人读）。
-for _stream in (sys.stdout,):
+# stdout/stderr 双双强制 UTF-8：Windows 默认代码页（GBK 等）下
+# ensure_ascii=False 的中文 JSON 帧会 UnicodeEncodeError（PyInstaller 冻结
+# 后在中文 Windows 上同样命中）。stderr 现由 Rust 读循环按 UTF-8 消费
+# （单窗口日志 tab+落盘），两端必须一致——否则 zh-CN locale（cp936）下
+# 中文日志行编码成 GBK，进前端与落盘全是乱码。
+for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
     else:  # PyInstaller 某些嵌入流无 reconfigure → 用 TextIOWrapper 重包
         import io
-        sys.stdout = io.TextIOWrapper(
+        _wrapped = io.TextIOWrapper(
             _stream.buffer, encoding="utf-8", errors="replace", line_buffering=True
         )
+        if _stream is sys.stdout:
+            sys.stdout = _wrapped
+        else:
+            sys.stderr = _wrapped
 
 # 业务错误类型以 methods.py 为准（-32000 契约源）；本模块不再定义同名类，
 # 历史上 sidecar.SidecarError 与 methods.SidecarError 同名不同源，导致

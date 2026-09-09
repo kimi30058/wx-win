@@ -48,4 +48,5 @@ Write-Host "smoke[3/3] activate: $resp3"
 if ($resp3 -match 'ModuleNotFoundError') { throw "真路径 wx.activate 缺依赖(本次事故形态): $resp3" }
 if (-not (($resp3 -match '"error"') -or ($resp3 -match '"result"'))) { throw "activate 应返回 JSON-RPC 帧, 实得: $resp3" }
 
+Write-Host ("exe size: {0:N1} MB" -f ((Get-Item $Exe).Length / 1MB))
 Write-Host "OK: $Exe"

@@ -1,6 +1,6 @@
 <template>
   <div class="activation">
-    <!-- 授权状态卡：未激活红 / 已通过绿 / 微信未开橙 -->
+    <!-- 授权状态卡：未激活红 / 已通过绿 / 微信未开橙 / 初始化错误橙 -->
     <t-card title="授权状态" :bordered="false">
       <div class="status-line">
         <span class="lamp" :class="lampClass" />
@@ -43,7 +43,7 @@
 <script setup lang="ts">
 /**
  * 激活视图：wxautox4 内核授权（spec 2026-09-08）。
- * 状态卡消费 store 三 getter；激活走 activateLicense（Rust 成功即内联
+ * 状态卡消费 store 三 getter + initErrorText（第 4 态）；激活走 activateLicense（Rust 成功即内联
  * 重试 init）；闭环由 state/init-fail 事件回流驱动，本视图只呈现。
  */
 import { computed, onUnmounted, reactive, ref, watch } from 'vue';
