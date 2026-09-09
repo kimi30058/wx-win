@@ -50,6 +50,8 @@ CI 冻结时 pip install wxautox4 连带装上传递依赖（构建机上有）
 
 断言原理：业务错（授权服务器拒绝/无授权）≠ 打包错（模块缺失）。第 2/3 条跑真 wxautox4 导入链，是 MOCK 冒烟穿透不了的事故路径的直接复现。onefile 自解压 + 真导入每条预计 +5~15s CI 时长，可接受。
 
+> **2026-09-09 CI 实测修正**：真 wxautox4 在无微信 CI 机上不承诺优雅降级——wx.init 实测空响应（原生崩溃/弹窗阻塞，Python 层不可 catch）。断言重心调整为：任何帧出现 `ModuleNotFoundError` 即打包缺陷（硬失败）；空响应/超时=环境行为（WARN，90s 超时防 6h 挂死）。缺依赖防线的核心信号不变。
+
 ## 3. P0-3 init RPC 错误帧归入 init_fail
 
 **改动**：`src-tauri/src/state.rs` `init_sequence` 的 `direct_wx_init().await.ok()` 改为 match：

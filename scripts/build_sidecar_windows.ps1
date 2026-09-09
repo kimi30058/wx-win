@@ -28,28 +28,61 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 Copy-Item "build/sidecar-dist/wxauto-sidecar.exe" "$OutDir/wxauto-sidecar-$Triple.exe" -Force
 
 # ── 冒烟三条 ──────────────────────────────────────────────
-# 1) MOCK：mock 数据回来（原有，不触 wxautox4）
-# 2) 真路径 wx.init：CI 无授权 → 应收「结果帧」（licensed:false）；
-#    若收「错误帧」即打包缺陷（缺 pythoncom/comtypes 等导入级依赖）
-# 3) 真路径 wx.activate 假码：授权服务器拒绝是业务错，可接受；
-#    ModuleNotFoundError 是打包错——本次事故的直接复现路径
+# 1) MOCK：mock 数据回来（不触 wxautox4，确定性硬断言）
+# 2/3) 真路径：断言重心 = 任何帧里出现 ModuleNotFoundError 即打包缺陷（硬失败）；
+#     空响应/超时 = CI 无微信环境下 wxautox4 原生崩溃或弹窗阻塞（环境行为，WARN）。
+#     2026-09-09 CI 五跑实证：真 wxautox4 在无微信机器不承诺优雅降级结果帧。
+# 帮手：超时防挂（弹窗会把 CI 挂 6 小时）+ stderr 显式回显（保住 [SIDECAR]
+# 日志在 CI 的可见性——重定向后不再自动透传）。
 $Exe = "$OutDir/wxauto-sidecar-$Triple.exe"
 
+function Invoke-SidecarRpc {
+    param([string]$ExePath, [string]$Request, [int]$TimeoutSec = 90)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $ExePath
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $p.StandardInput.WriteLine($Request)
+    $p.StandardInput.Close()
+    $timedOut = -not $p.WaitForExit($TimeoutSec * 1000)
+    if ($timedOut) { try { $p.Kill() } catch {} }
+    $stdout = try { $p.StandardOutput.ReadToEnd() } catch { "" }
+    $stderr = try { $p.StandardError.ReadToEnd() } catch { "" }
+    if ($stderr) { Write-Host $stderr }
+    $out = if ($stdout) { $stdout.Trim() } else { "" }
+    return @{ TimedOut = $timedOut; Out = $out }
+}
+
+# 1/3 MOCK
 $env:WXAUTO_MOCK = "1"
-$resp = '{"id": 1, "method": "wx.get_my_info", "params": {}}' | & $Exe | Select-Object -First 1
-Write-Host "smoke[1/3] mock wxid: $resp"
-if (-not ($resp -match '"wxid"')) { throw "sidecar exe MOCK 冒烟失败: $resp" }
-
+$r1 = Invoke-SidecarRpc -ExePath $Exe -Request '{"id": 1, "method": "wx.get_my_info", "params": {}}'
+Write-Host "smoke[1/3] mock: $($r1.Out)"
+if (-not ($r1.Out -match '"wxid"')) { throw "sidecar exe MOCK 冒烟失败: $($r1.Out)" }
 Remove-Item Env:WXAUTO_MOCK -ErrorAction SilentlyContinue
-$resp2 = '{"id": 2, "method": "wx.init", "params": {}}' | & $Exe | Select-Object -First 1
-Write-Host "smoke[2/3] init: $resp2"
-if (-not ($resp2 -match '"result"')) { throw "真路径 wx.init 应返回结果帧, 实得: $resp2" }
-if ($resp2 -match '"error"') { throw "真路径 wx.init 返回错误帧(疑似缺依赖): $resp2" }
 
-$resp3 = '{"id": 3, "method": "wx.activate", "params": {"code": "CI-SMOKE-FAKE"}}' | & $Exe | Select-Object -First 1
-Write-Host "smoke[3/3] activate: $resp3"
-if ($resp3 -match 'ModuleNotFoundError') { throw "真路径 wx.activate 缺依赖(本次事故形态): $resp3" }
-if (-not (($resp3 -match '"error"') -or ($resp3 -match '"result"'))) { throw "activate 应返回 JSON-RPC 帧, 实得: $resp3" }
+# 2/3 真路径 wx.init
+$r2 = Invoke-SidecarRpc -ExePath $Exe -Request '{"id": 2, "method": "wx.init", "params": {}}'
+Write-Host "smoke[2/3] init (timedOut=$($r2.TimedOut)): $($r2.Out)"
+if ($r2.Out -match 'ModuleNotFoundError') { throw "真路径 wx.init 报缺依赖(打包缺陷): $($r2.Out)" }
+if ($r2.Out -eq "") {
+    Write-Host "WARN: wx.init 无响应帧(超时=$($r2.TimedOut))——CI 无微信环境 wxautox4 原生崩溃/阻塞属环境行为, 非打包缺陷"
+} elseif (-not (($r2.Out -match '"result"') -or ($r2.Out -match '"error"'))) {
+    throw "wx.init 应返回 JSON-RPC 帧, 实得: $($r2.Out)"
+}
+
+# 3/3 真路径 wx.activate 假码（2026-09-08 事故直接复现路径）
+$r3 = Invoke-SidecarRpc -ExePath $Exe -Request '{"id": 3, "method": "wx.activate", "params": {"code": "CI-SMOKE-FAKE"}}'
+Write-Host "smoke[3/3] activate (timedOut=$($r3.TimedOut)): $($r3.Out)"
+if ($r3.Out -match 'ModuleNotFoundError') { throw "真路径 wx.activate 缺依赖(打包缺陷, 2026-09-08 事故形态): $($r3.Out)" }
+if ($r3.Out -eq "") {
+    Write-Host "WARN: activate 无响应帧(超时=$($r3.TimedOut))——同上环境行为"
+} elseif (-not (($r3.Out -match '"result"') -or ($r3.Out -match '"error"'))) {
+    throw "activate 应返回 JSON-RPC 帧, 实得: $($r3.Out)"
+}
 
 Write-Host ("exe size: {0:N1} MB" -f ((Get-Item $Exe).Length / 1MB))
 Write-Host "OK: $Exe"
