@@ -2,8 +2,8 @@
 //! stderr 读循环。GUI 的「运行日志」tab 数据源；CLI 模式完全不装配本模块
 //! 的捕获链（stderr 仍 inherit，行为零回归）。
 //!
-//! 本模块在 bin 目标下，`pub` 项不会被外部链接引用；现状仅剩两个
-//! `as_str`（AppLogLevel/AppLogSource 各一）仍空闲，项级
+//! 本模块在 bin 目标下，`pub` 项不会被外部链接引用；`as_str`×2 与
+//! `now_secs` 已由 file_log 模块消费（bin 内跨模块引用可命中），无需
 //! `#[allow(dead_code)]` 放行。
 //!
 //! 设计（spec 2026-09-03）：
@@ -26,7 +26,6 @@ pub enum AppLogLevel {
 }
 
 impl AppLogLevel {
-    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             AppLogLevel::Error => "error",
@@ -47,7 +46,6 @@ pub enum AppLogSource {
 }
 
 impl AppLogSource {
-    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             AppLogSource::Rust => "rust",
@@ -121,6 +119,14 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// 当前 epoch 秒（file_log 按天分文件/清理用；集中一处便于测试注入）
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// tracing 事件 → AppLogEntry 的字段收集器（只收 `message` 字段）
 struct MessageFieldVisitor {
     message: String,
@@ -138,6 +144,16 @@ impl tracing::field::Visit for MessageFieldVisitor {
             self.message = value.to_string();
         }
     }
+}
+
+/// tracing 事件 → message 字段字符串（UiLogLayer 与 file_log::FileLogLayer
+/// 共用的提取入口——MessageFieldVisitor 保持私有，消费方经此函数取值）
+pub fn extract_message(event: &tracing::Event<'_>) -> String {
+    let mut visitor = MessageFieldVisitor {
+        message: String::new(),
+    };
+    event.record(&mut visitor);
+    visitor.message
 }
 
 /// tracing Layer：每条事件格式化成 AppLogEntry → push ring + try_send mpsc。
@@ -169,15 +185,11 @@ where
             tracing::Level::DEBUG => AppLogLevel::Debug,
             tracing::Level::TRACE => AppLogLevel::Trace,
         };
-        let mut visitor = MessageFieldVisitor {
-            message: String::new(),
-        };
-        event.record(&mut visitor);
         let entry = AppLogEntry {
             ts: now_ms(),
             level,
             source: AppLogSource::Rust,
-            message: visitor.message,
+            message: extract_message(event),
         };
         self.ring.push(entry.clone());
         let _ = self.sink.try_send(entry);
@@ -215,6 +227,8 @@ impl wxauto_desktop::sidecar::StderrSink for RingStderrSink {
             message: line,
         };
         self.ring.push(entry.clone());
+        // 三通道之二（spec §5）：sidecar 行并联落盘（未装配 no-op）
+        crate::file_log::write_sidecar_entry(&entry);
         if let Some(tx) = &self.tx {
             // 满则丢行不反压（旁路观察者——与 UiLogLayer 同语义）
             let _ = tx.try_send(entry);

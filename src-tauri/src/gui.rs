@@ -51,15 +51,31 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (log_tx, log_rx) = tauri::async_runtime::channel::<crate::ui_log::AppLogEntry>(256);
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(std::io::stderr().is_terminal())
-                .with_writer(std::io::stderr),
-        )
-        .with(UiLogLayer::new(ring.clone(), log_tx.clone()))
-        .with(env_filter)
-        .init();
+    // 文件层（可选）：~/.wxauto-desktop/logs 按天落盘（spec §5 三通道之二）。
+    // Some 时多挂一层；None（目录拿不到/建不出）不装配——日志系统永不
+    // 阻断启动。registry 泛型叠加两分支类型不同，match 两段式各走各的 init
+    let fmt_layer = || {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(std::io::stderr().is_terminal())
+            .with_writer(std::io::stderr)
+    };
+    match crate::file_log::file_log_layer() {
+        Some(file_layer) => tracing_subscriber::registry()
+            .with(fmt_layer())
+            .with(UiLogLayer::new(ring.clone(), log_tx.clone()))
+            .with(file_layer)
+            .with(env_filter)
+            .init(),
+        None => tracing_subscriber::registry()
+            .with(fmt_layer())
+            .with(UiLogLayer::new(ring.clone(), log_tx.clone()))
+            .with(env_filter)
+            .init(),
+    }
+    // sidecar stderr 行 → 文件通道并联（RingStderrSink.consume 内调
+    // write_sidecar_entry；GUI 的 sidecar stderr 走 piped 进 ring，同一
+    // 入口天然带上落盘）
+    crate::file_log::install_sidecar_file_sink(crate::file_log::default_log_dir());
 
     // tauri 自管 runtime（内部 tokio）；async 装配经 setup 里的 spawn 进入
     let app = tauri::Builder::default()

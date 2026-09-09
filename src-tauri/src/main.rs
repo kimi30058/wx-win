@@ -26,6 +26,7 @@
 
 mod app_state;
 mod commands;
+mod file_log;
 mod gui;
 mod ui_events;
 mod ui_log;
@@ -60,14 +61,35 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 /// CLI 装配（Task 7 原样保留；见模块头注释）
 #[tokio::main]
 async fn run_cli() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt()
-        // stderr 非 tty（管道/重定向）时关 ANSI 防乱码,对齐 gui.rs
-        .with_ansi(std::io::stderr().is_terminal())
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // 日志初始化：registry 组合三层（对齐 gui.rs 形态）——
+    // 1. fmt 层 → stderr；2. EnvFilter（默认 info）
+    // 3. 文件层（可选）：~/.wxauto-desktop/logs 按天落盘（Some 时多挂，
+    //    目录拿不到/建不出返回 None 不装配——日志系统永不阻断启动；
+    //    registry 泛型叠加两分支类型不同，用 match 两段式各走各的 init）
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    // stderr 非 tty（管道/重定向）时关 ANSI 防乱码，对齐 gui.rs
+    let fmt_layer = || {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(std::io::stderr().is_terminal())
+            .with_writer(std::io::stderr)
+    };
+    match crate::file_log::file_log_layer() {
+        Some(file_layer) => tracing_subscriber::registry()
+            .with(fmt_layer())
+            .with(file_layer)
+            .with(env_filter)
+            .init(),
+        None => tracing_subscriber::registry()
+            .with(fmt_layer())
+            .with(env_filter)
+            .init(),
+    }
+    // sidecar stderr 行落盘通道（CLI 的 sidecar stderr 是 inherit 不进 ring，
+    // 但文件通道仍要装——诊断价值对 CLI 等价，spec §5）
+    crate::file_log::install_sidecar_file_sink(crate::file_log::default_log_dir());
 
     // 配置来源优先级：env > ~/.wxauto-desktop/config.json > 默认值
     let cfg = load_config(&default_config_path()).unwrap_or_else(|e| {
