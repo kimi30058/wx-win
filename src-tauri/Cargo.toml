@@ -17,8 +17,12 @@ futures-util = "0.3"
 rand = "0.8"
 dirs = "6"
 # token 持久化：Windows Credential Manager / macOS Keychain / Linux Secret Service
-# （Linux 无 dbus keyring 环境时调用报错，由 config.rs 优雅降级为 Err 返回）
-keyring = "3"
+# keyring 3.x 无 default features：不指定平台后端 = 全平台落到 mock store
+# （EntryOnly：值挂在 Entry 实例内存，跨 Entry::new 不可见）——生产表现为
+# 「设置 token 成功但读取恒 NoEntry → 连接恒 4001」。产品只发 Windows，
+# 只启用 windows-native（Windows Credential Manager）；非 Windows 平台
+# （本地 Linux dev/CI runner）回落 mock，相关测试用 cfg 守卫跳过。
+keyring = { version = "3", features = ["windows-native"] }
 tauri = { version = "2.11.5", features = ["test"] }
 
 [dev-dependencies]

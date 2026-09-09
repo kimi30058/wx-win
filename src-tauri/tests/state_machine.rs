@@ -258,20 +258,26 @@ fn test_default_config_path_shape() {
     assert!(s.ends_with("config.json"), "文件名应为 config.json: {s}");
 }
 
-/// keyring 往返：有凭据管理器则值一致；无（Linux 无 Secret Service 的
-/// 测试环境）则优雅 Err——绝不能 panic。
-/// 注：个别 headless 环境存在「set Ok 但 get NoEntry」的写读不一致怪癖
-/// （Secret Service mock 后端），视为环境限制通过——本用例的核心目标是
-/// 验证任何 keyring 环境下都不 panic。
+/// keyring 跨实例写读一致（生产 4001 根因回归锁）：
+/// keyring_set_token/keyring_get_token 各自 Entry::new 新实例——mock 后端
+/// （EntryOnly 持久化）下 set 写进实例内存、新实例 get 必 NoEntry，表现为
+/// 「设置 token 成功但连接恒 4001（token=<空>）」。真平台后端
+/// （windows-native）必须跨实例读回同值。
+/// 环境确无凭据服务时（极端 headless）两者都 Err 可接受，但「set Ok +
+/// get Err」组合 = 后端是 mock/坏，必须红。
+/// 仅 Windows 断言（产品只发 Windows；非 Windows 无平台后端回落 mock，
+/// cfg 守卫跳过——若误删 windows-native feature，Windows 构建/CI 必红）。
+#[cfg(target_os = "windows")]
 #[test]
 fn test_keyring_roundtrip_or_graceful_err() {
     let set_res = keyring_set_token("tok-test-123");
     let get_res = keyring_get_token();
     match (set_res, get_res) {
-        (Ok(()), Ok(v)) => assert_eq!(v, "tok-test-123"),
-        (Ok(()), Err(get_e)) => {
-            eprintln!("keyring 后端写读不一致（环境限制，跳过值断言）: {get_e}")
-        }
+        (Ok(()), Ok(v)) => assert_eq!(v, "tok-test-123", "跨实例读回值应与写入一致"),
+        (Ok(()), Err(get_e)) => panic!(
+            "set 成功但跨实例 get 失败——keyring 后端无跨实例持久化（mock 特征），\
+             生产表现为设置 token 后恒 4001: {get_e}"
+        ),
         (Err(set_e), get) => {
             assert!(!set_e.is_empty(), "错误信息应非空");
             // set 失败时 get 可能 Err（无后端）也可能 Ok（旧值残留），只排除「假装刚写入成功」
