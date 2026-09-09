@@ -37,7 +37,9 @@ a = Analysis(
     # 会 ERROR not found——2026-09-09 CI 首跑实证：pillow→PIL、pywin32 删
     # （真实子模块 pythoncom/win32com 原清单已有））；标准库若被 .pyd 动态
     # 引用也不会被 requires_dist 声明（tkinter，缺它 wx.init 直接
-    # ModuleNotFoundError）——CI 真路径冒烟是唯一防线。pywin32 子模块
+    # ModuleNotFoundError）——CI 真路径冒烟是唯一防线。标准库动态引用组：
+    # difflib 2026-09-09 CI 四跑实证；sqlite3/logging/xml.dom.minidom 预防性
+    # ——被 .pyd 动态 import 的标准库只能靠冒烟逐个暴露。pywin32 子模块
     # 按需逐个回填（win32process 2026-09-09 实证；win32api/con/gui/
     # clipboard/ui 预防性）。wxautox4 自家子模块经 collect_submodules
     # 全量枚举（languages 2026-09-09 CI 实证后根治）——升级 wxautox4
@@ -53,6 +55,11 @@ a = Analysis(
         "psutil",
         "pyperclip",
         "tkinter",
+        # 标准库动态引用组（同 tkinter 类别：被 .pyd 动态 import）
+        "difflib",
+        "sqlite3",
+        "logging",
+        "xml.dom.minidom",
         "win32process",
         "win32api",
         "win32con",
