@@ -9,23 +9,53 @@ import os
 import sys
 import threading
 
-# stdout/stderr 双双强制 UTF-8：Windows 默认代码页（GBK 等）下
-# ensure_ascii=False 的中文 JSON 帧会 UnicodeEncodeError（PyInstaller 冻结
-# 后在中文 Windows 上同样命中）。stderr 现由 Rust 读循环按 UTF-8 消费
-# （单窗口日志 tab+落盘），两端必须一致——否则 zh-CN locale（cp936）下
-# 中文日志行编码成 GBK，进前端与落盘全是乱码。
-for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-    else:  # PyInstaller 某些嵌入流无 reconfigure → 用 TextIOWrapper 重包
-        import io
-        _wrapped = io.TextIOWrapper(
-            _stream.buffer, encoding="utf-8", errors="replace", line_buffering=True
-        )
-        if _stream is sys.stdout:
-            sys.stdout = _wrapped
+# ── stdio 三流全部强制 UTF-8（2026-09-09 真机乱码事故：stdin 是第三个漏网流）──
+# stdout：Rust 读循环按 UTF-8 消费 JSON-RPC 帧，Windows 默认代码页（GBK 等）
+#   下 ensure_ascii=False 的中文帧会 UnicodeEncodeError（PyInstaller 冻结后
+#   在中文 Windows 上同样命中）。
+# stderr：日志走 Rust 按 UTF-8 消费（单窗口日志 tab+落盘），两端必须一致——
+#   否则 zh-CN locale（cp936）下中文日志行编码成 GBK，进前端与落盘全是乱码。
+# stdin（本次补齐）：Rust 侧 serde_json 写出的请求帧恒为 UTF-8 字节，而
+#   Windows 下 sys.stdin 默认按本地代码页（cp936）解码——「龚金龙」变
+#   「钁ｃ\udca5栭緳」式乱码且带 lone surrogate：listen.add 拿乱码去搜微信
+#   会话必然失败，wxautox4 内部 logging 编码 surrogate 再炸 UnicodeEncodeError
+#   连锁刷屏。stdin 归一 UTF-8 后整条链路（Rust UTF-8 写 → stdin UTF-8 读）
+#   与 locale 无关。
+def _ensure_utf8_streams():
+    """stdout/stderr/stdin 三流归一 UTF-8（幂等；无 buffer 的流静默跳过）
+
+    stdin 用 errors="surrogateescape"：与 Windows 默认 stdin 行为对齐——
+    字节流里偶发非 UTF-8 残片（理论不该有，Rust 恒写 UTF-8）时以代理项
+    透传而非炸 UnicodeDecodeError 杀死主循环；JSON 层会把它解析成非法帧
+    丢弃（main 循环对 JSONDecodeError 有兜底）。
+    stdout/stderr 维持 errors="replace"：出向流绝不能因不可编码字符断帧。
+    """
+    import io
+
+    for _stream, _errors in ((sys.stdout, "replace"), (sys.stderr, "replace"),
+                             (sys.stdin, "surrogateescape")):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors=_errors)
         else:
-            sys.stderr = _wrapped
+            _buf = getattr(_stream, "buffer", None)
+            # buffer 必须是真二进制层（有 readinto/write）才可重包：pytest 的
+            # DontReadFromInput 假 buffer 返回自身（TextIO 假件），重包会在
+            # flush 时 UnsupportedOperation——测试环境下跳过归一（假 stdin
+            # 本就不承担编码职责，monkeypatch 会替换成真流）
+            if _buf is None or not hasattr(_buf, "readinto"):
+                continue
+            _wrapped = io.TextIOWrapper(
+                _buf, encoding="utf-8", errors=_errors, line_buffering=True
+            )
+            if _stream is sys.stdout:
+                sys.stdout = _wrapped
+            elif _stream is sys.stderr:
+                sys.stderr = _wrapped
+            else:
+                sys.stdin = _wrapped
+
+
+_ensure_utf8_streams()
 
 # 业务错误类型以 methods.py 为准（-32000 契约源）；本模块不再定义同名类，
 # 历史上 sidecar.SidecarError 与 methods.SidecarError 同名不同源，导致
