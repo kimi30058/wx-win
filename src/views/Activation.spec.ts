@@ -32,6 +32,16 @@ async function setUnlicensed() {
   return store;
 }
 
+/** 初始化错误现场：Booting + 未知错误串（P0-3 第 4 态） */
+async function setInitError() {
+  const { useAppStore } = await import('../stores/app');
+  const store = useAppStore();
+  store.appState = 'SidecarBooting';
+  store.initFailReason = '初始化失败：sidecar 错误: [-32603] ModuleNotFoundError: No module named \'requests\'';
+  await flushPromises();
+  return store;
+}
+
 describe('Activation 视图', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
@@ -100,5 +110,16 @@ describe('Activation 视图', () => {
     // invoke('retry_init') 无第二参,mock 包装层透传 undefined——按命令名 find 调用(Settings.spec 同款)
     const retryCall = invokeMock.mock.calls.find((c) => c[0] === 'retry_init');
     expect(retryCall).toBeDefined();
+  });
+
+  it('初始化错误态（第 4 态）显示原始错误串与重装引导 + 橙灯', async () => {
+    const wrapper = mountActivation();
+    await setInitError();
+    await flushPromises();
+    // mount 挂 detached 容器（body.innerText 空）——与现有用例一致用 wrapper.text()
+    const text = wrapper.text();
+    expect(text).toContain('ModuleNotFoundError');
+    expect(text).toContain('重新安装');
+    expect(wrapper.find('.lamp--orange').exists()).toBe(true);
   });
 });

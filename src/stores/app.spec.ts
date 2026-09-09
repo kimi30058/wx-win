@@ -71,7 +71,7 @@ describe('激活状态推导（initFailReason × appState）', () => {
     expect(store.licensePassed).toBe(true);
   });
 
-  it('wxauto://init-fail 事件落 initFailReason（未知 reason 守卫忽略）', async () => {
+  it('wxauto://init-fail 事件落 initFailReason（未知 reason 原样透传 P0-3）', async () => {
     const store = useAppStore();
     await store.init();
     const reg = listenMock.mock.calls.find((c) => c[0] === 'wxauto://init-fail');
@@ -80,8 +80,8 @@ describe('激活状态推导（initFailReason × appState）', () => {
     const cb = reg[1];
     cb({ payload: { reason: 'licensed' } });
     expect(store.initFailReason).toBe('licensed');
-    cb({ payload: { reason: 'something_odd' } });
-    expect(store.initFailReason, '未知 reason 不覆盖').toBe('licensed');
+    cb({ payload: { reason: '初始化失败：sidecar 错误: [-32603] X' } });
+    expect(store.initFailReason, '未知错误串原样覆盖（透传）').toBe('初始化失败：sidecar 错误: [-32603] X');
   });
 
   it('状态进入 WxInit 及之后清 initFailReason', async () => {
@@ -124,14 +124,14 @@ describe('激活状态推导（initFailReason × appState）', () => {
     expect(store.initFailReason, '事件值优先，快照不覆盖').toBe('licensed');
   });
 
-  it('快照兜底守卫：未知 reason 忽略、null 快照不落值', async () => {
+  it('快照兜底守卫：空串/null 快照不落值（未知串透传）', async () => {
     const store = useAppStore();
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === 'get_init_fail_reason') return Promise.resolve('something_odd');
+      if (cmd === 'get_init_fail_reason') return Promise.resolve('');
       return Promise.resolve(null);
     });
     await store.init();
-    expect(store.initFailReason, '未知 reason 守卫忽略').toBe('');
+    expect(store.initFailReason, '空串快照不落值').toBe('');
   });
 
   it('activateLicense：invoke 透传 + 判别联合返回', async () => {
@@ -158,5 +158,43 @@ describe('激活状态推导（initFailReason × appState）', () => {
     expect(store.activeView).toBe('overview');
     store.switchView('activation');
     expect(store.activeView).toBe('activation');
+  });
+});
+
+describe('initFailReason 未知值透传（P0-3）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    listenMock.mockReset();
+    listenMock.mockImplementation(async () => () => undefined);
+    invokeMock.mockReset();
+    invokeMock.mockImplementation(() => Promise.resolve(null));
+  });
+
+  function bootStore() {
+    const store = useAppStore();
+    store.appState = 'SidecarBooting';
+    return store;
+  }
+
+  it('init_fail 事件携带未知 reason 时原样存储且不触发激活/缺微信 getter', () => {
+    const store = bootStore();
+    // 直接落状态字段（订阅 handler 逻辑由上方事件用例覆盖，这里测字段容错）
+    store.initFailReason = '初始化失败：sidecar 错误: [-32603] ModuleNotFoundError';
+    expect(store.initFailReason).toBe('初始化失败：sidecar 错误: [-32603] ModuleNotFoundError');
+    expect(store.needsActivation).toBe(false);
+    expect(store.wechatMissing).toBe(false);
+  });
+
+  it('快照兜底不再丢弃未知值', async () => {
+    const store = bootStore();
+    // get_init_fail_reason 返回未知串（Task 3 起 Rust 会写 init RPC 错误帧）
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_init_fail_reason') return Promise.resolve('初始化失败：sidecar 错误: [-32603] X');
+      if (cmd === 'get_app_state') return Promise.resolve('SidecarBooting');
+      if (cmd === 'get_recent_logs') return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    await store.init();
+    expect(store.initFailReason).toContain('初始化失败');
   });
 });

@@ -46,7 +46,7 @@
  * 状态卡消费 store 三 getter；激活走 activateLicense（Rust 成功即内联
  * 重试 init）；闭环由 state/init-fail 事件回流驱动，本视图只呈现。
  */
-import { onUnmounted, reactive, ref, watch } from 'vue';
+import { computed, onUnmounted, reactive, ref, watch } from 'vue';
 import { useAppStore } from '../stores/app';
 
 /** 运营联系方式（改文案随发版即可——YAGNI 不做配置项） */
@@ -63,12 +63,22 @@ onUnmounted(() => {
   if (jumpTimer) clearTimeout(jumpTimer);
 });
 
-/** 状态卡文案（三态 + 检测中兜底） */
+/** 初始化错误（P0-3 第 4 态）：RPC 错误帧透传的原始串 */
+const initErrorText = computed(() =>
+  store.sidecarBooting && !store.needsActivation && !store.wechatMissing && store.initFailReason !== ''
+    ? store.initFailReason
+    : ''
+);
+
+/** 状态卡文案（三态 + 初始化错误第 4 态 + 检测中兜底） */
 const statusText = ref('正在检测授权状态…');
 function refreshStatusText() {
   if (store.licensePassed) statusText.value = 'wxautox4 授权正常';
   else if (store.needsActivation) statusText.value = 'wxautox4 未激活：微信自动化核心功能不可用';
   else if (store.wechatMissing) statusText.value = '已激活，但未检测到微信客户端——请打开微信 PC 客户端后点击「重新初始化」';
+  else if (initErrorText.value) {
+    statusText.value = `初始化错误：${initErrorText.value}——程序文件可能不完整，请重新安装或联系管理员`;
+  }
   else statusText.value = '正在检测授权状态…';
 }
 const lampClass = ref('lamp--gray');
@@ -76,10 +86,11 @@ function refreshLampClass() {
   if (store.licensePassed) lampClass.value = 'lamp--green';
   else if (store.needsActivation) lampClass.value = 'lamp--red';
   else if (store.wechatMissing) lampClass.value = 'lamp--yellow';
+  else if (initErrorText.value) lampClass.value = 'lamp--orange';
   else lampClass.value = 'lamp--gray';
 }
 watch(
-  () => [store.licensePassed, store.needsActivation, store.wechatMissing],
+  () => [store.licensePassed, store.needsActivation, store.wechatMissing, initErrorText.value],
   () => {
     refreshStatusText();
     refreshLampClass();
@@ -145,6 +156,10 @@ watch(
 .lamp--yellow {
   background: var(--td-warning-color);
   box-shadow: 0 0 6px var(--td-warning-color);
+}
+.lamp--orange {
+  background: #e37318;
+  box-shadow: 0 0 6px #e37318;
 }
 .lamp--red {
   background: var(--td-error-color);

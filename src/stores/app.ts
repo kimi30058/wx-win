@@ -11,7 +11,8 @@
  * - `wxauto://message`  payload MessageItem
  * - `wxauto://command-log` payload CommandLogItem
  * - `wxauto://app-log`  payload AppLogItem（运行日志，1000 环形）
- * - `wxauto://init-fail` payload { reason: 'licensed'|'wechat_missing' }
+ * - `wxauto://init-fail` payload { reason: string }（已知值 'licensed'/
+ *   'wechat_missing'；P0-3 起还可能是任意错误串——Rust init RPC 错误帧透传）
  *
  * invoke 契约：get_config / save_config / get_listen_names / add_listen /
  * remove_listen / manual_execute / connect / disconnect / get_app_state /
@@ -34,14 +35,13 @@ export type AppStateName =
   | 'Busy'
   | 'Degraded';
 
-/** init 未就绪原因（Rust wxauto://init-fail 载荷；''=无） */
-export type InitFailReasonName = '' | 'licensed' | 'wechat_missing';
+/** init 未就绪原因（Rust wxauto://init-fail 载荷；''=无）。
+ * 已知值：'licensed' | 'wechat_missing'；P0-3 起还可能是任意错误串
+ * （Rust init RPC 错误帧透传，如「初始化失败：sidecar 错误: …」）。 */
+export type InitFailReasonName = string;
 
 /** 已过授权判据态（进入即视为 license 通过） */
 const LICENSE_PASSED_STATES: AppStateName[] = ['WxInit', 'Ready', 'Busy', 'Degraded'];
-
-/** 已知 init 失败原因（未知值守卫忽略——防 sidecar 异常值污染 UI） */
-const KNOWN_INIT_FAIL_REASONS: string[] = ['licensed', 'wechat_missing'];
 
 /** 激活结果判别联合（Rust activate_license 的 resolve/reject 归一） */
 export interface ActivationOutcome {
@@ -288,8 +288,10 @@ export const useAppStore = defineStore('app', {
         );
         unlisteners.push(
           await listen<unknown>('wxauto://init-fail', (e) => {
-            if (isInitFailPayload(e.payload) && KNOWN_INIT_FAIL_REASONS.includes(e.payload.reason)) {
-              this.initFailReason = e.payload.reason as InitFailReasonName;
+            // 已知两值与未知错误串均原样透传（P0-3）：展示层按 getter 判等，
+            // 未知串落入激活页第 4 态；载荷守卫只验 reason 是 string。
+            if (isInitFailPayload(e.payload)) {
+              this.initFailReason = e.payload.reason;
             }
           }),
         );
@@ -334,9 +336,9 @@ export const useAppStore = defineStore('app', {
         if (
           this.initFailReason === '' &&
           typeof failSnap === 'string' &&
-          KNOWN_INIT_FAIL_REASONS.includes(failSnap)
+          failSnap !== ''
         ) {
-          this.initFailReason = failSnap as InitFailReasonName;
+          this.initFailReason = failSnap;
         }
         // 运行日志历史补齐（bridge attach 前的条目事件无重放——快照兜底）
         const logs = await invoke<unknown>('get_recent_logs');
