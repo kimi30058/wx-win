@@ -104,6 +104,15 @@ impl WxSession {
         self.sidecar.lock().await.exit_watcher()
     }
 
+    /// 杀当前 sidecar 但不换新句柄（Supervisor wx.init 超时耗尽路径）：
+    /// 与 replace_sidecar 的善后同款（kill 通道请 reaper 代杀 + wait 回收），
+    /// 区别是不注入替代者——重启归 run 循环的 spawner，保持单一路径。
+    /// 句柄留在原位：closed 标志让后续 call 快速 Closed，退出观察通道
+    /// 如常广播死亡，主循环 await_exit 即刻返回。
+    pub async fn shutdown_current_sidecar(&self) {
+        self.sidecar.lock().await.shutdown().await;
+    }
+
     /// 直连调用（编排层动作，如 wx.init）：绕过 16-action 白名单但仍走
     /// sidecar 的 RPC 协议与超时。WS 下行指令一律走 execute，不从此进。
     pub async fn direct_call(&self, method: &str, params: Value) -> Result<Value, RpcError> {

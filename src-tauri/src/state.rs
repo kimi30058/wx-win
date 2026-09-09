@@ -35,8 +35,17 @@ pub const RESTART_BACKOFF: [Duration; 5] = [
 ];
 
 /// wx.init 专属超时：比 RPC_TIMEOUT(30s) 短——init 无响应即视 sidecar
-/// 病态，尽快进入崩溃处理循环（见 direct_wx_init 注释）
+/// 病态，尽快进入崩溃处理循环（见 direct_wx_init 注释）。
+/// 注意这不是「sidecar 已死」的判据：冻结包冷启动（磁盘缓存冷 + 杀软
+/// 实时扫描）首个 wx.init 可达 ~9-11s（2026-09-09 真机事故），超时只说明
+/// 「这一发没等到」，由 INIT_RETRY_GAPS 接管再试——第二次调用时 Python
+/// 已完成导入，通常秒回（见 wx_init_with_retry 注释）。
 const INIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// wx.init 超时后的重试间隔（2026-09-09 真机事故修复）：
+/// 首发超时 ≠ sidecar 死——冷启动慢是环境态不是病态。间隔 5s 给冻结包
+/// 足够时间完成导入；两发重试（共 3 次尝试）全超时才判病态走 shutdown。
+const INIT_RETRY_GAPS: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(5)];
 
 /// 「活够久」阈值：sidecar 存活超过该时长后崩溃,失败计数才在重启时清零。
 /// spawn 成功但立即退出（Windows 9009 找不到命令 / 杀软删 exe）不清零——
@@ -236,6 +245,10 @@ pub struct Supervisor {
     spawner: SidecarSpawner,
     /// 退避表（生产 RESTART_BACKOFF；测试注入毫秒级加速）
     backoff_table: Arc<Vec<Duration>>,
+    /// wx.init 单次超时（生产 INIT_TIMEOUT；测试注入毫秒级加速）
+    init_timeout: Duration,
+    /// wx.init 超时重试间隔表（长度即重试次数；生产 INIT_RETRY_GAPS）
+    init_retry_gaps: Vec<Duration>,
     /// 事件出口（GUI 事件桥；None 时只进 WS 由 AgentLink 上报，这里跳过）
     event_sink: Option<Box<dyn Fn(Value) + Send + Sync>>,
     /// 最近一次 init 失败快照（I1：init_fail 事件先于前端 listen 注册
@@ -260,6 +273,8 @@ impl Supervisor {
             listeners,
             spawner: default_spawner(),
             backoff_table: Arc::new(RESTART_BACKOFF.to_vec()),
+            init_timeout: INIT_TIMEOUT,
+            init_retry_gaps: INIT_RETRY_GAPS.to_vec(),
             event_sink: None,
             last_init_fail: RwLock::new(None),
             phase: RwLock::new("constructed"),
@@ -286,6 +301,13 @@ impl Supervisor {
     /// 注入自定义退避表（测试加速；长度即最大重试次数）
     pub fn with_backoff(mut self, backoff: impl Into<Vec<Duration>>) -> Self {
         self.backoff_table = Arc::new(backoff.into());
+        self
+    }
+
+    /// 注入 wx.init 超时与重试间隔（测试加速；间隔表长度即重试次数）
+    pub fn with_init_retry(mut self, timeout: Duration, gaps: impl Into<Vec<Duration>>) -> Self {
+        self.init_timeout = timeout;
+        self.init_retry_gaps = gaps.into();
         self
     }
 
@@ -372,7 +394,7 @@ impl Supervisor {
     /// 未授权 / 微信未开 / init 报错：留在 Booting；Ok 且带原因时发 init_fail 帧
     /// 引导前端（transport 级 RPC 失败不发——那是 sidecar 死亡，归 Supervisor 重启域）。
     async fn init_sequence(&self) {
-        let init = match self.direct_wx_init().await {
+        let init = match self.wx_init_with_retry().await {
             Ok(v) => Some(v),
             Err(RpcError::Sidecar(msg)) => {
                 // ADR-0011：RPC 错误帧 = sidecar 活着、wx 层报错（依赖缺失/
@@ -391,8 +413,10 @@ impl Supervisor {
                 .await;
                 return;
             }
-            Err(_) => None, // Timeout/Io/Closed = transport 级（sidecar 死/卡），
-                            // 归 Supervisor 重启域——不写快照不谎报授权失败
+            Err(_) => None, // Io/Closed = transport 级（sidecar 已死），归
+                            // Supervisor 重启域——不写快照不谎报授权失败。
+                            // Timeout 在 wx_init_with_retry 内已耗尽重试并
+                            // shutdown 病态 sidecar，await_exit 即刻可返回。
         };
         let licensed = init
             .as_ref()
@@ -454,13 +478,45 @@ impl Supervisor {
 
     /// 直连 sidecar 调 wx.init（绕过 session 串行队列与 16-action 白名单——
     /// init 是编排层动作而非 WS action；仍复用 sidecar 的 RPC 协议实现）。
-    /// 超时收紧到 10s：默认 30s 是给慢 UIA 操作的，init 若 10s 内无响应
-    /// 说明 sidecar 已死/卡死，挂满 30s 只会拖慢 Supervisor 重启节奏
-    /// （sidecar 死后 closed 标志快速失败，此处兜底「活着但不回」的病态）。
-    async fn direct_wx_init(&self) -> Result<Value, RpcError> {
-        self.session
-            .direct_call_with_timeout(methods::INIT, json!({}), INIT_TIMEOUT)
-            .await
+    ///
+    /// 超时重试（2026-09-09 真机事故修复）：冻结包冷启动（磁盘缓存冷 +
+    /// 杀软扫描）首个 wx.init 可达 ~9-11s，吃满 10s 超时后旧实现直接丢弃
+    /// 结果——sidecar 活着、Supervisor 等进程退出等不到，前端永卡
+    /// 「正在检测授权状态…」。修复语义：
+    /// - Timeout → 隔 INIT_RETRY_GAPS 再试（第二次调用时 Python 导入已完成，
+    ///   通常秒回；迟到的那发响应只是孤儿丢弃，无副作用）；
+    /// - 重试耗尽仍 Timeout → 判病态：shutdown 当前 sidecar，让主循环
+    ///   await_exit 立即返回、走既有退避重启——「尽快进入崩溃处理循环」
+    ///   的设计意图真正兑现；
+    /// - Sidecar（业务错误帧）即返不重试（确定性失败）；Io/Closed 即返
+    ///   不重试（进程级死亡，重试无意义）。
+    async fn wx_init_with_retry(&self) -> Result<Value, RpcError> {
+        let mut attempt: usize = 0;
+        loop {
+            match self
+                .session
+                .direct_call_with_timeout(methods::INIT, json!({}), self.init_timeout)
+                .await
+            {
+                Ok(v) => return Ok(v),
+                Err(RpcError::Timeout) => {
+                    let Some(gap) = self.init_retry_gaps.get(attempt).copied() else {
+                        tracing::error!(
+                            attempts = attempt + 1,
+                            "wx.init 连续超时，shutdown 病态 sidecar 交退避重启"
+                        );
+                        // 杀当前 sidecar（经 kill 通道请 reaper 代杀）。
+                        // 不在这里 respawn——那是 run 循环的职责，保持单一路径。
+                        self.session.shutdown_current_sidecar().await;
+                        return Err(RpcError::Timeout);
+                    };
+                    attempt += 1;
+                    tracing::warn!(attempt, ?gap, "wx.init 超时（冷启动慢/卡），稍后重试");
+                    tokio::time::sleep(gap).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// 事件出口：event_sink（若有）。WS 侧 status 上报由 AgentLink 心跳承担。
