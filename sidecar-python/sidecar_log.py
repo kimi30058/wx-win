@@ -10,6 +10,7 @@ Rust 侧 FileSink 统一收口，Python 不重复写文件）。
 import sys
 import threading
 import time
+from contextlib import contextmanager
 
 _lock = threading.Lock()
 
@@ -23,3 +24,16 @@ def log(level: str, msg: str) -> None:
             sys.stderr.flush()
     except Exception:  # noqa: BLE001 — 日志永不阻断业务
         pass
+
+
+@contextmanager
+def guard_stdout():
+    """真实路径期间把 sys.stdout 临时换成 stderr——wxautox4 会向 stdout
+    print 授权横幅（2026-09-09 CI 六跑实证），污染 JSON-RPC 帧通道；
+    重定向后横幅走日志通道（ring+落盘），协议恢复纯净。"""
+    old = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        yield
+    finally:
+        sys.stdout = old

@@ -149,34 +149,43 @@ def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
         return {"licensed": True, "wxid": "mock_wx", "nickname": "模拟设备"}
     # 真实导入（仅 Windows + 已 pip install wxautox4 时可达）
     sidecar_log.log("INFO", "wx.init 开始（真实模式）")
-    from wxautox4 import WeChat, WxParam  # noqa: PLC0415 — 延迟导入是硬要求（Linux 无此库）
-    from wxautox4.utils.useful import check_license  # noqa: PLC0415
-
-    # 全局参数（spec 附录 A 已验证配置）
-    WxParam.MESSAGE_HASH = True
-    WxParam.FORCE_MESSAGE_XBIAS = True
-    WxParam.CHAT_WINDOW_SIZE = (1500, 6000)
-    WxParam.DEFAULT_MESSAGE_YBIAS = 40
-
-    _license_ok = bool(check_license())
-    # 失败三态：未授权恒 licensed（可行动根因优先）；授权过但微信未开才是
-    # wechat_missing——旧版两版本兜底都抛会整体 RPC 报错，现降为带原因返回
-    fail_reason = None if _license_ok else "licensed"
     try:
-        _instance = WeChat(version="微信")
-    except Exception:  # noqa: BLE001 — 国际版微信兜底（参考项目验证的双版本尝试）
-        try:
-            _instance = WeChat(version="WeChat")
-        except Exception:  # noqa: BLE001
-            if _license_ok:
-                fail_reason = "wechat_missing"
-    result = {
-        "licensed": _license_ok,
-        "wxid": getattr(_instance, "wxid", ""),
-        "nickname": getattr(_instance, "nickname", ""),
-    }
-    if fail_reason:
-        result["failReason"] = fail_reason
+        with sidecar_log.guard_stdout():
+            from wxautox4 import WeChat, WxParam  # noqa: PLC0415 — 延迟导入是硬要求（Linux 无此库）
+            from wxautox4.utils.useful import check_license  # noqa: PLC0415
+
+            # 全局参数（spec 附录 A 已验证配置）
+            WxParam.MESSAGE_HASH = True
+            WxParam.FORCE_MESSAGE_XBIAS = True
+            WxParam.CHAT_WINDOW_SIZE = (1500, 6000)
+            WxParam.DEFAULT_MESSAGE_YBIAS = 40
+
+            _license_ok = bool(check_license())
+            # 失败三态：未授权恒 licensed（可行动根因优先）；授权过但微信未开才是
+            # wechat_missing——旧版两版本兜底都抛会整体 RPC 报错，现降为带原因返回
+            fail_reason = None if _license_ok else "licensed"
+            try:
+                _instance = WeChat(version="微信")
+            except Exception:  # noqa: BLE001 — 国际版微信兜底（参考项目验证的双版本尝试）
+                try:
+                    _instance = WeChat(version="WeChat")
+                except Exception:  # noqa: BLE001
+                    if _license_ok:
+                        fail_reason = "wechat_missing"
+            result = {
+                "licensed": _license_ok,
+                "wxid": getattr(_instance, "wxid", ""),
+                "nickname": getattr(_instance, "nickname", ""),
+            }
+            if fail_reason:
+                result["failReason"] = fail_reason
+    except SystemExit:
+        # wxautox4 check_license 语境的 SystemExit=未授权设备裸退（2026-09-09
+        # CI 六跑实证：横幅 print 到 stdout + raise SystemExit，except Exception
+        # 接不住）——归一为既有三态，激活页正常引导，sidecar 不死
+        _license_ok = False
+        sidecar_log.log("WARN", "wx.init：wxautox4 未授权 SystemExit 裸退，归一 licensed 三态")
+        return {"licensed": False, "wxid": "", "nickname": "", "failReason": "licensed"}
     sidecar_log.log("INFO", f"wx.init 完成: licensed={_license_ok} failReason={fail_reason}")
     return result
 
@@ -200,17 +209,24 @@ def _activate(params, wx, msg_pool, msg_pool_ts, notify, mock):
         }
     # 真实导入（仅 Windows + 已 pip install wxautox4 时可达）
     sidecar_log.log("INFO", "wx.activate 开始（真实模式）")
-    from wxautox4.utils.useful import authenticate  # noqa: PLC0415 — 延迟导入是硬要求
+    try:
+        with sidecar_log.guard_stdout():
+            from wxautox4.utils.useful import authenticate  # noqa: PLC0415 — 延迟导入是硬要求
 
-    if not authenticate(code):
-        sidecar_log.log("WARN", "wx.activate 失败：激活码无效或已过期")
+            if not authenticate(code):
+                sidecar_log.log("WARN", "wx.activate 失败：激活码无效或已过期")
+                return {"ok": False, "message": "激活失败：激活码无效或已过期"}
+            # 回查确认：authenticate 过但状态未生效的极端情况不静默吞
+            from wxautox4.utils.useful import check_license  # noqa: PLC0415
+
+            if not check_license():
+                sidecar_log.log("WARN", "wx.activate：码已接受但授权未生效")
+                return {"ok": False, "message": "激活码已接受但授权状态未生效，请重启应用"}
+    except SystemExit:
+        # authenticate/check_license 语境的 SystemExit=码被拒/设备未授权裸退
+        # （横幅+SystemExit，同 wx.init 实证）——归一为既有失败文案，可重试
+        sidecar_log.log("WARN", "wx.activate：wxautox4 SystemExit 裸退，归一激活失败文案")
         return {"ok": False, "message": "激活失败：激活码无效或已过期"}
-    # 回查确认：authenticate 过但状态未生效的极端情况不静默吞
-    from wxautox4.utils.useful import check_license  # noqa: PLC0415
-
-    if not check_license():
-        sidecar_log.log("WARN", "wx.activate：码已接受但授权未生效")
-        return {"ok": False, "message": "激活码已接受但授权状态未生效，请重启应用"}
     sidecar_log.log("INFO", "wx.activate 成功")
     return {"ok": True, "message": "激活成功"}
 

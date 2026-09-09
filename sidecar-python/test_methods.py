@@ -245,6 +245,25 @@ def test_init_real_path_wechat_missing(monkeypatch):
     assert r["failReason"] == "wechat_missing"
 
 
+def test_init_real_path_systemexit_normalized(monkeypatch, capsys):
+    """CI 六跑回归：未授权设备 check_license 向 stdout 打横幅后 SystemExit 裸退。
+
+    wxautox4 的 check_license 把授权横幅 print 到 stdout（JSON-RPC 帧专用通道）
+    再 raise SystemExit（非 Exception 子类，except Exception 接不住）——裸机
+    首启动 wx.init 即 sidecar 死、Supervisor 无限重启。守卫双职责：
+    ① 横幅改道 stderr（帧通道纯净）；② SystemExit 归一 licensed=false 三态
+    （激活页正常引导，sidecar 不死）。
+    """
+    _install_fake_wxautox4(monkeypatch, license_exits=True)
+    r = _dispatch("wx.init", {}, None)
+    assert r["licensed"] is False
+    assert r["failReason"] == "licensed"
+    assert r["wxid"] == "" and r["nickname"] == ""
+    captured = capsys.readouterr()
+    assert "未授权设备" not in captured.out  # stdout 帧通道未被横幅污染
+    assert "未授权设备" in captured.err      # 横幅被守卫改道日志通道
+
+
 def test_wx_get_my_info_reads_id_key(fakewx):
     """GetMyInfo() dict key 'id'（附录 A：不是 '微信号'/'昵称' 键）"""
     r = _dispatch("wx.get_my_info", {}, fakewx)
@@ -851,19 +870,35 @@ def test_sidecar_writers_serialized_under_lock():
 # ══════════ wx.activate（激活码认证）══════════
 
 
-def _install_fake_wxautox4(monkeypatch, licensed=True, authenticate_result=True, wechat_ok=True):
+# CI 六跑实证的未授权横幅原文（stdout 污染源；guard_stdout 须把它改道 stderr）
+_LICENSE_BANNER = ">>> 未授权设备，获取授权：https://wxauto.org"
+
+
+def _install_fake_wxautox4(monkeypatch, licensed=True, authenticate_result=True, wechat_ok=True,
+                           license_exits=False, authenticate_exits=False):
     """伪造 wxautox4 包：sys.modules 预置三模块 + 顶层属性挂接。
 
     wechat_ok=False 时 WeChat() 构造即抛（模拟微信窗口未找到，供 wx.init
     三态测试使用）；wx.activate 不触 WeChat，默认值即可。
+    license_exits/authenticate_exits=True 时模拟 wxautox4 真实未授权行为：
+    向 stdout print 横幅后 raise SystemExit（CI 六跑实证的裸机首启动形态）。
     返回 calls 字典记录 authenticate 实参（断言激活码透传）。
     """
     import types
 
     calls = {"authenticate": []}
 
+    def _check_license():
+        if license_exits:
+            print(_LICENSE_BANNER)
+            raise SystemExit(1)
+        return licensed
+
     def _authenticate(code):
         calls["authenticate"].append(code)
+        if authenticate_exits:
+            print(_LICENSE_BANNER)
+            raise SystemExit(1)
         return authenticate_result
 
     class _FakeWeChat:
@@ -872,7 +907,7 @@ def _install_fake_wxautox4(monkeypatch, licensed=True, authenticate_result=True,
                 raise RuntimeError("微信窗口未找到")
 
     useful = types.ModuleType("wxautox4.utils.useful")
-    useful.check_license = lambda: licensed
+    useful.check_license = _check_license
     useful.authenticate = _authenticate
     utils = types.ModuleType("wxautox4.utils")
     utils.useful = useful
@@ -919,6 +954,21 @@ def test_activate_accepted_but_not_effective(monkeypatch):
     r = _dispatch("wx.activate", {"code": "X"}, None)
     assert r["ok"] is False
     assert "重启应用" in r["message"]
+
+
+def test_activate_systemexit_normalized(monkeypatch, capsys):
+    """CI 六跑同源回归：authenticate 被拒（横幅 + SystemExit 裸退）归一失败文案。
+
+    守卫双职责同 _init：横幅走 stderr、SystemExit 不裸穿（sidecar 不死，
+    激活页收到既有「激活码无效或已过期」失败文案可重试）。
+    """
+    _install_fake_wxautox4(monkeypatch, authenticate_exits=True)
+    r = _dispatch("wx.activate", {"code": "BAD"}, None)
+    assert r["ok"] is False
+    assert "无效" in r["message"]
+    captured = capsys.readouterr()
+    assert "未授权设备" not in captured.out
+    assert "未授权设备" in captured.err
 
 
 def test_activate_mock_mode():
@@ -968,3 +1018,31 @@ def test_init_mock_unlicensed_injection(monkeypatch):
     finally:
         del os.environ["WXAUTO_MOCK_UNLICENSED"]
         importlib.reload(methods)
+
+
+def test_sidecar_main_loop_systemexit_fallback(monkeypatch, capsys):
+    """CI 六跑纵深防御：主循环对 SystemExit 兜底转 -32603 错误帧。
+
+    SystemExit 不是 Exception 子类——methods 层漏归一时（如其它方法触到
+    wxautox4 退出），主循环 except Exception 接不住、进程无帧即死。本用例
+    模拟 dispatch 抛 SystemExit，断言进程存活且有错误帧可回。
+    """
+    import io
+    import json
+    import sidecar
+
+    def _boom(method, params):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(sidecar, "MOCK", True)  # 跳过 pythoncom 初始化
+    monkeypatch.setattr(sidecar, "dispatch", _boom)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(
+        '{"jsonrpc": "2.0", "id": 7, "method": "msg.send", "params": {}}\n'))
+    sidecar.main()
+    out = capsys.readouterr().out
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) == 1, f"应恰输出一帧错误，实际: {lines}"
+    frame = json.loads(lines[0])
+    assert frame["id"] == 7
+    assert frame["error"]["code"] == -32603
+    assert "wxautox4 异常退出" in frame["error"]["message"]

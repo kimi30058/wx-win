@@ -140,6 +140,11 @@ def main():
             # 业务错误 → -32000（methods.SidecarError 是 methods.py 抛出的类型；
             # 本文件顶部的 SidecarError 类与之同名不同源，捕获它永不命中）
             _error(req["id"], -32000, str(e))
+        except SystemExit as e:
+            # wxautox4 未授权等场景的裸退（SystemExit 非 Exception 子类，下方
+            # except Exception 接不住）——纵深防御：methods 层漏归一时仍有帧
+            sidecar_log.log("ERROR", f"dispatch {req.get('method', '?')} 触发 SystemExit: {e}")
+            _error(req["id"], -32603, f"wxautox4 异常退出: {e}")
         except Exception as e:  # noqa: BLE001 — sidecar 边界统一转 error 帧
             sidecar_log.log("ERROR", f"dispatch {req.get('method', '?')} 失败: {type(e).__name__}: {e}")
             _error(req["id"], -32603, f"{type(e).__name__}: {e}")
