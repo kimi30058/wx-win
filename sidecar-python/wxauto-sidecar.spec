@@ -13,11 +13,20 @@
 # - one-file 模式：装机免解压；启动稍慢（自解压到 temp）但分发最简
 # - mock 模式（WXAUTO_MOCK=1）不触 wxautox4——CI 无微信也能冒烟
 
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+
+# wxautox4 是编译型 wheel：.pyd 内部动态 import 自家子模块（languages 等，
+# 2026-09-09 CI 三跑逐个暴露）——静态分析看不见。collect_submodules 在
+# 构建机（wxautox4 已 pip install）上用 pkgutil 枚举全部子模块一网打尽；
+# collect_data_files 同理收包内非 Python 数据文件（语言包等）。
+_wxautox4_all = collect_submodules("wxautox4")
+_wxautox4_data = collect_data_files("wxautox4")
+
 a = Analysis(
     ["sidecar.py"],
     pathex=["."],
     binaries=[],
-    datas=[],
+    datas=_wxautox4_data,
     # wxautox4 传递依赖显式补齐（2026-09-08 真机事故：wxautox4 是编译型
     # wheel，.pyd 内部的 import 静态分析看不见，冻结包缺 requests 导致
     # activate 抛 ModuleNotFoundError）。清单来源 = PyPI wxautox4 41.1.1.post1
@@ -30,7 +39,9 @@ a = Analysis(
     # 引用也不会被 requires_dist 声明（tkinter，缺它 wx.init 直接
     # ModuleNotFoundError）——CI 真路径冒烟是唯一防线。pywin32 子模块
     # 按需逐个回填（win32process 2026-09-09 实证；win32api/con/gui/
-    # clipboard/ui 预防性）。
+    # clipboard/ui 预防性）。wxautox4 自家子模块经 collect_submodules
+    # 全量枚举（languages 2026-09-09 CI 实证后根治）——升级 wxautox4
+    # 无须再手工补子模块，但 requires_dist 的第三方依赖清单仍须人工核对。
     hiddenimports=[
         "wxautox4",
         "wxautox4.utils.useful",
@@ -51,6 +62,7 @@ a = Analysis(
         "requests",
         "sounddevice",
         "tenacity",
+        *_wxautox4_all,
     ],
     hookspath=[],
     hooksconfig={},
