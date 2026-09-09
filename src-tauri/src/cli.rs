@@ -29,10 +29,8 @@ pub const BUNDLED_SIDECAR_NAMES: [&str; 2] = [
     "wxauto-sidecar.exe",
 ];
 #[cfg(not(windows))]
-pub const BUNDLED_SIDECAR_NAMES: [&str; 2] = [
-    "wxauto-sidecar-x86_64-unknown-linux-gnu",
-    "wxauto-sidecar",
-];
+pub const BUNDLED_SIDECAR_NAMES: [&str; 2] =
+    ["wxauto-sidecar-x86_64-unknown-linux-gnu", "wxauto-sidecar"];
 
 /// exe 同目录探测内置 sidecar（安装态）：按候选名依次找，命中返回绝对路径。
 /// 开发态（target/debug 等目录）无此文件 → None 走回退链。
@@ -171,9 +169,8 @@ mod tests {
     /// 引号包裹的含空格路径不被拆坏（follow-up #2 回归）
     #[test]
     fn test_parse_sidecar_cmd_quoted_path_with_spaces() {
-        let (prog, args) = parse_sidecar_cmd(
-            "\"C:\\Program Files\\wxauto\\wxauto-sidecar.exe\" --mock",
-        );
+        let (prog, args) =
+            parse_sidecar_cmd("\"C:\\Program Files\\wxauto\\wxauto-sidecar.exe\" --mock");
         assert_eq!(prog, r"C:\Program Files\wxauto\wxauto-sidecar.exe");
         assert_eq!(args, vec!["--mock"]);
     }
@@ -208,7 +205,10 @@ mod tests {
         let r = find_bundled_sidecar();
         if let Some(path) = r {
             // 若命中（异常布局），至少应是存在的绝对路径文件
-            assert!(std::path::Path::new(&path).is_file(), "命中路径必须存在: {path}");
+            assert!(
+                std::path::Path::new(&path).is_file(),
+                "命中路径必须存在: {path}"
+            );
         }
         // 候选必须覆盖安装态名（tauri-bundler 去 triple 后的产物）
         #[cfg(windows)]

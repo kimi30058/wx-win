@@ -48,7 +48,10 @@ struct Gate {
 /// RwLock 读守卫中毒恢复（Option<ValueSink> 专用：读侧克隆，锁立即释放）
 fn read_sink(
     lock: &RwLock<Option<ValueSink>>,
-) -> Result<Option<ValueSink>, std::sync::PoisonError<std::sync::RwLockReadGuard<'_, Option<ValueSink>>>> {
+) -> Result<
+    Option<ValueSink>,
+    std::sync::PoisonError<std::sync::RwLockReadGuard<'_, Option<ValueSink>>>,
+> {
     lock.read().map(|g| g.clone())
 }
 
@@ -61,7 +64,8 @@ fn write_sink<'a>(
 
 /// 读守卫中毒恢复（通用）：panic 方只改数据不改结构，取回守卫继续用
 fn read_or_recover<'a, T>(lock: &'a RwLock<T>) -> std::sync::RwLockReadGuard<'a, T> {
-    lock.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// 心跳间隔（spec §5.1：30s ping）
