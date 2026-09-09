@@ -28,7 +28,9 @@ a = Analysis(
     # 会 ERROR not found——2026-09-09 CI 首跑实证：pillow→PIL、pywin32 删
     # （真实子模块 pythoncom/win32com 原清单已有））；标准库若被 .pyd 动态
     # 引用也不会被 requires_dist 声明（tkinter，缺它 wx.init 直接
-    # ModuleNotFoundError）——CI 真路径冒烟是唯一防线。
+    # ModuleNotFoundError）——CI 真路径冒烟是唯一防线。pywin32 子模块
+    # 按需逐个回填（win32process 2026-09-09 实证；win32api/con/gui/
+    # clipboard/ui 预防性）。
     hiddenimports=[
         "wxautox4",
         "wxautox4.utils.useful",
@@ -40,6 +42,12 @@ a = Analysis(
         "psutil",
         "pyperclip",
         "tkinter",
+        "win32process",
+        "win32api",
+        "win32con",
+        "win32gui",
+        "win32clipboard",
+        "win32ui",
         "requests",
         "sounddevice",
         "tenacity",
