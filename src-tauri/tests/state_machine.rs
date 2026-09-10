@@ -231,6 +231,23 @@ fn test_config_roundtrip() {
     assert_eq!(loaded.webhook_template, "{\"text\":\"{title}\"}");
 }
 
+/// 旧版本 config.json（无 webhook 键）读入不报错——两字段 default 空串（C1 升级路径锁）
+#[test]
+fn test_load_config_legacy_json_without_webhook_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        r#"{"serverUrl":"ws://10.0.0.5:60021","channelId":"ch-1","autoConnect":true,"listenNames":["群A"],"delayMinMs":500,"delayMaxMs":1000}"#,
+    )
+    .unwrap();
+    let cfg = load_config(&path).expect("旧格式配置读入不应报错");
+    assert_eq!(cfg.server_url, "ws://10.0.0.5:60021", "存量字段不受影响");
+    assert_eq!(cfg.webhook_url, "", "无 webhookUrl 键应 default 空串");
+    assert_eq!(cfg.webhook_template, "");
+    assert_eq!(cfg.listen_names, vec!["群A".to_string()]);
+}
+
 /// 配置文件缺失 → 返回默认值（首启场景不报错）
 #[test]
 fn test_load_config_missing_file_returns_default() {

@@ -36,8 +36,10 @@ pub struct Config {
     /// 拟人延时上限（毫秒）
     pub delay_max_ms: u64,
     /// webhook 告警地址（空=禁用；2026-09-10 P1）
+    #[serde(default)]
     pub webhook_url: String,
     /// webhook 自定义模板（空=通用 JSON {title,detail,ts,device}）
+    #[serde(default)]
     pub webhook_template: String,
 }
 
