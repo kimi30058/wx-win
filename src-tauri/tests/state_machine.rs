@@ -213,6 +213,8 @@ fn test_config_roundtrip() {
         listen_names: vec!["张三".into(), "李四".into()],
         delay_min_ms: 300,
         delay_max_ms: 800,
+        webhook_url: "https://open.feishu.cn/hook/abc".into(),
+        webhook_template: "{\"text\":\"{title}\"}".into(),
     };
     save_config(&path, &cfg).expect("保存配置失败");
     let loaded = load_config(&path).expect("加载配置失败");
@@ -225,6 +227,8 @@ fn test_config_roundtrip() {
     );
     assert_eq!(loaded.delay_min_ms, 300);
     assert_eq!(loaded.delay_max_ms, 800);
+    assert_eq!(loaded.webhook_url, "https://open.feishu.cn/hook/abc");
+    assert_eq!(loaded.webhook_template, "{\"text\":\"{title}\"}");
 }
 
 /// 配置文件缺失 → 返回默认值（首启场景不报错）

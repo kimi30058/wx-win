@@ -38,6 +38,8 @@ pub struct SettingsPatch {
     pub server_url: String,
     pub channel_id: String,
     pub auto_connect: bool,
+    pub webhook_url: String,
+    pub webhook_template: String,
 }
 
 /// 从前端提交的 config JSON 按字段提取（Task 8 审查硬性输入 #3：
@@ -48,6 +50,8 @@ pub fn extract_settings_patch(config: &Value) -> SettingsPatch {
         server_url: config["serverUrl"].as_str().unwrap_or_default().to_string(),
         channel_id: config["channelId"].as_str().unwrap_or_default().to_string(),
         auto_connect: config["autoConnect"].as_bool().unwrap_or(false),
+        webhook_url: config["webhookUrl"].as_str().unwrap_or_default().to_string(),
+        webhook_template: config["webhookTemplate"].as_str().unwrap_or_default().to_string(),
     }
 }
 
@@ -514,6 +518,8 @@ impl AppStateCtx {
             cfg.server_url = patch.server_url;
             cfg.channel_id = patch.channel_id;
             cfg.auto_connect = patch.auto_connect;
+            cfg.webhook_url = patch.webhook_url;
+            cfg.webhook_template = patch.webhook_template;
             config::save_config(&self.config_path, &cfg)?;
         }
         // 落盘成功后热重载（原配置读写锁在 start_link 的 build_url 里还要读，
@@ -575,6 +581,19 @@ mod tests {
         let empty = extract_settings_patch(&json!({}));
         assert_eq!(empty.server_url, "");
         assert!(!empty.auto_connect);
+
+        // webhook 两字段提取（2026-09-10 P1）
+        let patch3 = extract_settings_patch(&serde_json::json!({
+            "serverUrl": "s", "channelId": "c", "autoConnect": true,
+            "webhookUrl": "https://open.feishu.cn/hook/x", "webhookTemplate": "{\"text\":\"{title}\"}"
+        }));
+        assert_eq!(patch3.webhook_url, "https://open.feishu.cn/hook/x");
+        assert_eq!(patch3.webhook_template, "{\"text\":\"{title}\"}");
+        // 缺字段兜底空串（不 panic）
+        let patch4 = extract_settings_patch(&serde_json::json!({
+            "serverUrl": "s", "channelId": "c"
+        }));
+        assert_eq!(patch4.webhook_url, "");
     }
 
     /// config 序列化：camelCase 字段名（前端 parseAppConfig 守卫对齐）

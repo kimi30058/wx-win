@@ -35,6 +35,10 @@ pub struct Config {
     pub delay_min_ms: u64,
     /// 拟人延时上限（毫秒）
     pub delay_max_ms: u64,
+    /// webhook 告警地址（空=禁用；2026-09-10 P1）
+    pub webhook_url: String,
+    /// webhook 自定义模板（空=通用 JSON {title,detail,ts,device}）
+    pub webhook_template: String,
 }
 
 impl Default for Config {
@@ -47,6 +51,8 @@ impl Default for Config {
             listen_names: Vec::new(),
             delay_min_ms: 500,
             delay_max_ms: 1000,
+            webhook_url: String::new(),
+            webhook_template: String::new(),
         }
     }
 }
@@ -129,5 +135,16 @@ mod tests {
         assert!(v.get("listenNames").is_some(), "字段应为 listenNames");
         assert!(v.get("delayMinMs").is_some(), "字段应为 delayMinMs");
         assert!(v.get("delayMaxMs").is_some(), "字段应为 delayMaxMs");
+    }
+
+    /// 新增 webhook 两字段：默认空串（=禁用）+ camelCase 序列化
+    #[test]
+    fn test_webhook_fields_default_and_camel() {
+        let c = Config::default();
+        assert_eq!(c.webhook_url, "", "默认禁用");
+        assert_eq!(c.webhook_template, "");
+        let v = serde_json::to_value(Config::default()).unwrap();
+        assert_eq!(v["webhookUrl"], "");
+        assert!(v.get("webhook_template").is_none(), "序列化必须是 camelCase");
     }
 }
