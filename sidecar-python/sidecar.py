@@ -65,6 +65,61 @@ import sidecar_log  # noqa: E402 — 同目录；日志走 stderr（stdout 铁�
 
 MOCK = os.environ.get("WXAUTO_MOCK", "") == "1"
 
+
+# ── CA 证书持久化（P2 任务 9）────────────────────────────────────────────
+# PyInstaller onefile 的 cacert.pem 位于 %TEMP%\_MEIxxxx 临时目录，挂机
+# 电脑的「存储感知/管家类软件」会清理 %TEMP% → TLS 全炸、重启后恢复
+# （参考项目 web_server.py install_persistent_ca_bundle 的真实生产事故）。
+# sidecar 同为 onefile 冻结 + wxautox4 激活/授权走 HTTPS（requests）——
+# 同款暴露面。启动时把 pem 复制到持久目录（与 config.json 同目录），
+# 并让全部 HTTP 库改用持久副本。
+
+
+def install_persistent_ca_bundle(persistent_dir=None):
+    """onefile 冻结态把 cacert.pem 落到持久目录并接管证书路径。
+
+    - 非冻结（开发/CI）：直接返回 False，不动任何 env
+    - 冻结态：certifi.where() 原子复制（tmp+os.replace）到持久目录，
+      设 REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE / SSL_CERT_FILE 三 env
+      （requests/httpx/openai 系各自读取），并 monkeypatch certifi.where
+      ——httpcore 的默认证书上下文也走持久副本
+    - 任何失败只 WARN 不炸：证书复制失败时各库仍走原 _MEI 路径，
+      行为不劣于现状
+    """
+    if not getattr(sys, "frozen", False):
+        return False
+    try:
+        import certifi  # noqa: PLC0415 — 冻结态才有意义，延迟导入
+        import shutil
+
+        if persistent_dir is None:
+            home = os.path.expanduser("~") or "."
+            persistent_dir = os.path.join(home, ".wxauto-desktop")
+        os.makedirs(persistent_dir, exist_ok=True)
+        persistent = os.path.join(persistent_dir, "cacert.pem")
+
+        src = certifi.where()
+        if src and os.path.exists(src):
+            tmp = persistent + ".tmp"
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, persistent)
+        if not os.path.exists(persistent):
+            sidecar_log.log("WARN", f"持久 CA 证书不可得（源缺失）: {src}")
+            return False
+
+        os.environ["REQUESTS_CA_BUNDLE"] = persistent   # requests 每请求时读取
+        os.environ["CURL_CA_BUNDLE"] = persistent       # 双保险
+        os.environ["SSL_CERT_FILE"] = persistent        # httpx(openai 系) trust_env
+        certifi.where = lambda: persistent              # httpcore 默认证书上下文
+        sidecar_log.log("INFO", f"持久 CA 证书包已安装: {persistent}")
+        return True
+    except Exception as e:  # noqa: BLE001 — 诊断通道不得阻断启动
+        sidecar_log.log("WARN", f"安装持久 CA 证书包失败（继续用默认路径）: {e}")
+        return False
+
+
+install_persistent_ca_bundle()
+
 # ── wxautox4 全局（真实模式延迟导入；本文件不 import wxautox4——Linux 上无此库）──
 _wx = None                 # wxautox4.WxAuto 实例
 _msg_pool = {}             # {msg_id: (msg, chat_who)}，60s 过期（Task 2 的 quote/forward 用）
