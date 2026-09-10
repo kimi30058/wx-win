@@ -1,9 +1,10 @@
-//! 21 个 sidecar 方法的强类型定义（spec §3.2）
+//! 20 个 sidecar 方法的强类型定义（spec §3.2）
 //! 方法名常量是 call 的第一参；参数用 serde_json::json! 构造后过 XxxParams 序列化。
 //! 完整的参数/结果结构随各 Task 落地补充，本文件先交付方法名常量 + 核心消息结构。
 use serde::{Deserialize, Serialize};
 
-/// 方法名常量（21 个；与 Python sidecar methods.py 一一对应）
+/// 方法名常量（20 个；与 Python sidecar methods.py 一一对应。
+/// chat.open 已退役——不在 16-action 白名单，三方零消费，P2 死代码清理）
 pub mod methods {
     pub const INIT: &str = "wx.init";
     pub const ACTIVATE: &str = "wx.activate";
@@ -13,7 +14,6 @@ pub mod methods {
     pub const FILE_SEND: &str = "file.send";
     pub const MSG_QUOTE: &str = "msg.quote";
     pub const MSG_FORWARD: &str = "msg.forward";
-    pub const CHAT_OPEN: &str = "chat.open";
     pub const CHAT_SEARCH: &str = "chat.search";
     pub const CHAT_HISTORY: &str = "chat.history";
     pub const LISTEN_ADD: &str = "listen.add";
@@ -75,7 +75,6 @@ mod tests {
         assert_eq!(methods::FILE_SEND, "file.send");
         assert_eq!(methods::MSG_QUOTE, "msg.quote");
         assert_eq!(methods::MSG_FORWARD, "msg.forward");
-        assert_eq!(methods::CHAT_OPEN, "chat.open");
         assert_eq!(methods::CHAT_SEARCH, "chat.search");
         assert_eq!(methods::CHAT_HISTORY, "chat.history");
         assert_eq!(methods::LISTEN_ADD, "listen.add");

@@ -27,7 +27,7 @@ from unittest.mock import MagicMock  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _fast_sleep(monkeypatch):
-    """拟人延时在测试中全部短路（chat.open 1s / accept 5s / 朋友圈 1~5s 随机等）"""
+    """拟人延时在测试中全部短路（chat 定位 1s / accept 5s / 朋友圈 1~5s 随机等）"""
     monkeypatch.setattr(time, "sleep", lambda s: None)
 
 
@@ -419,11 +419,8 @@ def test_send_error_message_extraction():
 
 
 # ══════════ 聊天窗口 ══════════
-
-
-def test_chat_open_uses_chatwith_keyword_who(fakewx):
-    _dispatch("chat.open", {"who": "文件传输助手"}, fakewx)
-    assert fakewx.opened == ["文件传输助手"]
+# chat.open 已退役（P2 死代码清理：不在 16-action 白名单，三方零消费；
+# ChatWith 预热能力由 _listen_add / _chat_search / _chat_history 内部自持）
 
 
 def test_chat_search_found(fakewx):
@@ -920,15 +917,16 @@ def test_unknown_method_raises():
 
 
 def test_mock_covers_all_non_init_methods():
-    """MOCK 表必须覆盖除 wx.init 外的全部 19 个方法（Linux CI 全链路依赖）
+    """MOCK 表必须覆盖除 wx.init 外的全部 18 个方法（Linux CI 全链路依赖）
 
     wx.activate 不在此列：它走 dispatch 特判（mock 时直达 _activate 的
     mock 分支，见 test_activate_mock_mode），不经 _mock_dispatch 查表。
+    chat.open 已删（P2 死代码清理：不在 16-action 白名单，三方零消费）。
     """
     methods_list = [
         "wx.get_my_info", "wx.is_online",
         "msg.send", "file.send", "msg.quote", "msg.forward",
-        "chat.open", "chat.search", "chat.history",
+        "chat.search", "chat.history",
         "listen.add", "listen.remove", "listen.list",
         "friends.new_requests", "friend.accept",
         "moments.get", "moments.publish",
@@ -939,6 +937,15 @@ def test_mock_covers_all_non_init_methods():
                   "msgId": "m", "name": "n", "count": 1, "ms": 1, "n": 1}
         r = _dispatch(m, params, None, mock=True)
         assert isinstance(r, dict), f"MOCK 未覆盖: {m}"
+
+
+def test_chat_open_removed():
+    """chat.open 已退役：dispatch 表不得再路由（调用即业务错误）"""
+    import methods
+
+    assert "chat.open" not in methods._METHODS
+    with pytest.raises(methods.SidecarError):
+        _dispatch("chat.open", {"who": "x"}, None, mock=False)
 
 
 def test_mock_unknown_raises():

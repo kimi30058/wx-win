@@ -453,13 +453,6 @@ def _locate_msg(wx, who, content_match):
     return None
 
 
-def _chat_open(params, wx, msg_pool, msg_pool_ts, notify, mock):
-    """chat.open：ChatWith(who=...) 关键字 who + 1s 等待窗口就绪"""
-    wx.ChatWith(who=params["who"])
-    time.sleep(1)
-    return {"ok": True}
-
-
 def _chat_search(params, wx, msg_pool, msg_pool_ts, notify, mock):
     """chat.search：ChatWith 定位 + GetSubWindow 校验（spec §2.3 待真机验证项）"""
     kw = params["keyword"]
@@ -753,7 +746,6 @@ def _mock_dispatch(method, params):
         "file.send": {"ok": True},
         "msg.quote": {"ok": True},
         "msg.forward": {"ok": True},
-        "chat.open": {"ok": True},
         "chat.search": {"found": True, "who": params.get("keyword", "")},
         "chat.history": {"messages": [{
             "msg_id": "mock_m1", "chat_who": params.get("who", ""), "chat_type": "friend",
@@ -788,7 +780,6 @@ _METHODS = {
     "file.send": _file_send,
     "msg.quote": _msg_quote,
     "msg.forward": _msg_forward,
-    "chat.open": _chat_open,
     "chat.search": _chat_search,
     "chat.history": _chat_history,
     "listen.add": _listen_add,
