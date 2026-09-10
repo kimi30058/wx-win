@@ -216,7 +216,8 @@ def _seen_recently(key, now=None):
             else:
                 break
         if key in _DEDUP_WINDOW:
-            _DEDUP_WINDOW[key] = ts  # 刷新时刻
+            del _DEDUP_WINDOW[key]      # 先删——重插移到最新侧,保住清扫的有序不变量
+            _DEDUP_WINDOW[key] = ts
             return True
         _DEDUP_WINDOW[key] = ts
         if len(_DEDUP_WINDOW) > _DEDUP_CAPACITY:

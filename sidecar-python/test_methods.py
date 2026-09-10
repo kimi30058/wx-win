@@ -768,6 +768,36 @@ def test_dedup_capacity_evicts_oldest(fakewx):
     assert len(notifications) == 1026
 
 
+def test_dedup_refresh_keeps_order_expired_older_sibling_passes(fakewx):
+    """命中刷新保序：头部键刷新后,其后更老的已过期键必须放行（I1 回归锁）
+
+    时序：K@t0 入窗 → A@t0+1 入窗 → K@t0+4 命中刷新（不保序则 K 仍钉在最旧侧）
+    → A@t0+6.5 再达（age 5.5s 已过期）。不保序实现：清扫见 K(2.5s) 即 break,
+    A 残留窗内被误吞；保序实现：A 已被清扫弹出,放行。
+    """
+    import methods
+    notifications = []
+    msg_pool, msg_pool_ts = {}, {}
+    _dispatch("listen.add", {"nickname": "客户群"}, fakewx,
+              notify=lambda m, p: notifications.append((m, p)),
+              msg_pool=msg_pool, msg_pool_ts=msg_pool_ts)
+    chat = FakeChat("客户群", chat_type="group")
+    msg_k = FakeMsg(content="K")
+    msg_a = FakeMsg(content="A")
+    real = time.monotonic
+
+    base = real()
+    with methods._DEDUP_LOCK:
+        methods._DEDUP_WINDOW.clear()
+        methods._DEDUP_WINDOW[methods._dedup_key(msg_k, "客户群")] = base          # K@t0
+        methods._DEDUP_WINDOW[methods._dedup_key(msg_a, "客户群")] = base + 1      # A@t0+1
+    # K 命中刷新（直接驱动 _seen_recently,now=base+4）
+    assert methods._seen_recently(methods._dedup_key(msg_k, "客户群"), now=base + 4) is True
+    # A@base+6.5 再达：age 5.5s 已过期 → 必须放行（False）
+    assert methods._seen_recently(methods._dedup_key(msg_a, "客户群"), now=base + 6.5) is False, \
+        "刷新保序修复后,更老的 A 应被清扫放行"
+
+
 def test_listen_callback_passes_is_at_true(fakewx):
     """群内 @机器人消息：msg.is_at=True 透传到通知帧（硬编码 false 的矫正）"""
     notifications = []
