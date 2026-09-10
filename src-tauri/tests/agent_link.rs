@@ -693,3 +693,40 @@ for line in sys.stdin:
     assert!(got_event, "缓冲的 event 应在 hello 后 flush 到达");
     runner.abort();
 }
+
+// ── eventId 生成与组帧（listen-persist-event-outbox Task 4）──
+
+mod event_id_tests {
+    use super::*;
+    use wxauto_desktop::agent_link::inbound::next_event_id;
+
+    /// eventId 形状 evt-{ms}-{seq} 且进程内单调（同毫秒 seq 递增保证字典序单调）
+    #[test]
+    fn test_next_event_id_shape_and_monotonic() {
+        let a = next_event_id();
+        let b = next_event_id();
+        assert!(a.starts_with("evt-"), "前缀: {a}");
+        assert!(b > a, "序号递增保证字典序单调: {a} < {b}");
+        let parts: Vec<&str> = a.split('-').collect();
+        assert_eq!(parts.len(), 3, "evt-{{ms}}-{{seq}} 三段: {a}");
+        assert!(parts[1].parse::<u64>().is_ok(), "ms 段应为数字: {a}");
+        assert!(parts[2].parse::<u64>().is_ok(), "seq 段应为数字: {a}");
+    }
+
+    /// 三种 event 组帧函数输出帧带 eventId
+    #[test]
+    fn test_event_frames_carry_event_id() {
+        let note = json!({
+            "msg_id": "m1", "chat_who": "张三", "chat_type": "friend", "attr": "friend",
+            "msg_type": "text", "sender": "张三", "content": "hi"
+        });
+        let f = message_event_from_notification(&note, None, None);
+        assert!(f["eventId"].as_str().unwrap_or("").starts_with("evt-"));
+
+        let fr = friend_request_event("王五", "请求添加好友");
+        assert!(fr["eventId"].as_str().unwrap_or("").starts_with("evt-"));
+
+        let st = status_event(true, 1, true);
+        assert!(st["eventId"].as_str().unwrap_or("").starts_with("evt-"));
+    }
+}

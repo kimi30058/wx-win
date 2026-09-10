@@ -5,6 +5,17 @@
 //! 图片/语音的二次处理（media.download / voice.to_text）由 AgentLink 编排
 //! （需要 sidecar 会话句柄），本模块只负责纯组帧。
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// 进程内事件序号（evt-{unix_ms}-{seq}：同毫秒内 seq 递增保证字典序单调）
+static EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 生成下一个事件 id（进程唯一；进程重启后 ms 段不同天然不撞——spec §3.1）
+pub fn next_event_id() -> String {
+    let ms = now_ms();
+    let seq = EVENT_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("evt-{ms}-{seq}")
+}
 
 /// message.received 通知参数 → event:message 帧
 /// - `downloaded_media`：图片二次 RPC（download_media）成功时的本地路径
@@ -32,6 +43,7 @@ pub fn message_event_from_notification(
             "isAt": false,
             "downloadedMedia": downloaded_media.unwrap_or(""),
         },
+        "eventId": next_event_id(),
         "ts": now_ms(),
     })
 }
@@ -42,6 +54,7 @@ pub fn friend_request_event(name: &str, msg: &str) -> Value {
         "kind": "event",
         "type": "friend_request",
         "data": { "name": name, "msg": msg },
+        "eventId": next_event_id(),
         "ts": now_ms(),
     })
 }
@@ -52,6 +65,7 @@ pub fn status_event(wx_online: bool, listeners: usize, sidecar_alive: bool) -> V
         "kind": "event",
         "type": "status",
         "data": { "wxOnline": wx_online, "listeners": listeners, "sidecarAlive": sidecar_alive },
+        "eventId": next_event_id(),
         "ts": now_ms(),
     })
 }
