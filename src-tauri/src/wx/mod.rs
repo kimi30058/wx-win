@@ -18,10 +18,27 @@ use crate::sidecar::protocol::RpcError;
 use crate::sidecar::spec::methods;
 use crate::sidecar::{SidecarHandle, RPC_TIMEOUT};
 
-/// 操作间拟人延时下限
+/// 操作间拟人延时下限（默认；可被 Config.delayMinMs 覆盖）
 const MIN_GAP: Duration = Duration::from_millis(500);
-/// 操作间拟人延时上限
+/// 操作间拟人延时上限（默认；可被 Config.delayMaxMs 覆盖）
 const MAX_GAP: Duration = Duration::from_millis(1000);
+
+/// 拟人间隙合法域下限（P2 任务 8b）：低于 100ms 无拟人意义（防扫一眼
+/// 就是被 ban 的节奏）；上限 10s 防误配把串行队列拖死。
+const GAP_FLOOR: Duration = Duration::from_millis(100);
+const GAP_CEIL: Duration = Duration::from_secs(10);
+
+/// Config 的 delayMinMs/delayMaxMs → 合法 (min, max) 间隙对：
+/// 非法（min>max / 越界 / 零）回退默认 500~1000ms。纯函数可单测。
+pub fn sanitize_gaps(min_ms: u64, max_ms: u64) -> (Duration, Duration) {
+    let (min, max) = (Duration::from_millis(min_ms), Duration::from_millis(max_ms));
+    if min >= GAP_FLOOR && max <= GAP_CEIL && min <= max {
+        (min, max)
+    } else {
+        tracing::warn!(min_ms, max_ms, "拟人间隙配置非法，回退默认 500~1000ms");
+        (MIN_GAP, MAX_GAP)
+    }
+}
 
 /// 读类 action 超时后的重试间隔（P2 任务 7；对齐 wx.init 重试的
 /// 「慢热」形态：第一发超时的同时 sidecar 已在推进，间隔给足时间）
@@ -49,14 +66,31 @@ pub struct WxSession {
     sidecar: Arc<Mutex<SidecarHandle>>,
     /// 串行队列：所有微信操作逐个执行（拿锁 → 调用 → 拟人间隙 → 释放）
     queue: Arc<Mutex<()>>,
+    /// 拟人间隙上下限（P2 任务 8b：Config.delayMinMs/MaxMs 接线；
+    /// 构造时 sanitize，运行期只读）
+    gap_range: (Duration, Duration),
 }
 
 impl WxSession {
-    /// 构造会话。sidecar 用 `Arc<Mutex<>>` 包裹以支持多处共享（Task 1 的 call 是 `&mut self`）
+    /// 构造会话（默认拟人间隙 500~1000ms）。sidecar 用 `Arc<Mutex<>>` 包裹
+    /// 以支持多处共享（Task 1 的 call 是 `&mut self`）
     pub fn new(sidecar: Arc<Mutex<SidecarHandle>>) -> Self {
         Self {
             sidecar,
             queue: Arc::new(Mutex::new(())),
+            gap_range: (MIN_GAP, MAX_GAP),
+        }
+    }
+
+    /// 指定拟人间隙构造（Config.delayMinMs/MaxMs 接线入口；非法值内部回退默认）
+    pub fn with_gaps(
+        sidecar: Arc<Mutex<SidecarHandle>>,
+        delay_min_ms: u64,
+        delay_max_ms: u64,
+    ) -> Self {
+        Self {
+            gap_range: sanitize_gaps(delay_min_ms, delay_max_ms),
+            ..Self::new(sidecar)
         }
     }
 
@@ -110,7 +144,7 @@ impl WxSession {
             }
             r => r?,
         };
-        let gap = rand_gap();
+        let gap = rand_gap(self.gap_range);
         tokio::time::sleep(gap).await;
         Ok(result)
     }
@@ -234,11 +268,13 @@ fn transform_params(action: &str, p: Value) -> Value {
     }
 }
 
-/// 拟人间隙（500~1000ms 均匀随机）：Task 4 引入 rand 后替换时间戳伪随机
-fn rand_gap() -> Duration {
-    let span = (MAX_GAP - MIN_GAP).as_millis() as u64;
+/// 拟人间隙（range 均匀随机）：Task 4 引入 rand 后替换时间戳伪随机；
+/// range 来自会话构造（Config 接线或默认 500~1000ms）
+fn rand_gap(range: (Duration, Duration)) -> Duration {
+    let (min, max) = range;
+    let span = (max - min).as_millis() as u64;
     let jitter = rand::thread_rng().gen_range(0..=span);
-    MIN_GAP + Duration::from_millis(jitter)
+    min + Duration::from_millis(jitter)
 }
 
 #[cfg(test)]
@@ -281,9 +317,42 @@ mod tests {
     #[test]
     fn test_rand_gap_bounds() {
         for _ in 0..200 {
-            let g = rand_gap();
+            let g = rand_gap((MIN_GAP, MAX_GAP));
             assert!(g >= MIN_GAP && g <= MAX_GAP, "gap 越界: {g:?}");
         }
+    }
+
+    /// 自定义区间：rand_gap 落在指定范围内
+    #[test]
+    fn test_rand_gap_custom_range() {
+        let (lo, hi) = (Duration::from_millis(200), Duration::from_millis(600));
+        for _ in 0..200 {
+            let g = rand_gap((lo, hi));
+            assert!(g >= lo && g <= hi, "自定义 gap 越界: {g:?}");
+        }
+    }
+
+    /// P2 任务 8b：delay 配置 sanitize——合法透传 / 非法回退默认
+    #[test]
+    fn test_sanitize_gaps() {
+        use std::time::Duration as D;
+        // 合法：正常区间 / 恰好贴边界
+        assert_eq!(
+            sanitize_gaps(200, 800),
+            (D::from_millis(200), D::from_millis(800))
+        );
+        assert_eq!(
+            sanitize_gaps(100, 10_000),
+            (D::from_millis(100), D::from_secs(10))
+        );
+        // 非法：min > max
+        assert_eq!(sanitize_gaps(800, 200), (MIN_GAP, MAX_GAP));
+        // 非法：min 低于 100ms 拟人下限
+        assert_eq!(sanitize_gaps(50, 800), (MIN_GAP, MAX_GAP));
+        // 非法：max 超过 10s 上限
+        assert_eq!(sanitize_gaps(200, 20_000), (MIN_GAP, MAX_GAP));
+        // 非法：零值（Config 缺省直填 0 的场景）
+        assert_eq!(sanitize_gaps(0, 0), (MIN_GAP, MAX_GAP));
     }
 
     /// 读类白名单：8 个只读 action 可重试，全部写类 action 不可

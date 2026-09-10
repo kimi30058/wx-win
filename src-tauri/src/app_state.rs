@@ -363,8 +363,13 @@ impl AppStateCtx {
                     .await
                     .map_err(|e| format!("sidecar 启动失败: {e}"))?;
                 let sidecar = Arc::new(Mutex::new(sidecar));
-                // 2. session + listeners
-                let session = Arc::new(WxSession::new(sidecar.clone()));
+                // 2. session + listeners（P2 任务 8b：delayMinMs/MaxMs 接线——
+                // 配置的拟人间隙经 sanitize 后生效，非法值回退默认 500~1000ms）
+                let session = Arc::new(WxSession::with_gaps(
+                    sidecar.clone(),
+                    cfg.delay_min_ms,
+                    cfg.delay_max_ms,
+                ));
                 let listeners = Arc::new(ListenerRegistry::new(session.clone()));
                 // 3. 状态机（注入 on_change：六态变化 → wxauto://state。
                 //    bridge 已在 shell 阶段 attach——首事件不丢，问题 B 消除）

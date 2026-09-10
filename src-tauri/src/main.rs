@@ -103,8 +103,13 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // 1. 首代 sidecar（Supervisor 不负责首启——只管退出后的退避重启）
     let sidecar = Arc::new(Mutex::new(SidecarHandle::spawn_default().await?));
-    // 2. session + listeners（所有微信操作的唯一入口）
-    let session = Arc::new(WxSession::new(sidecar.clone()));
+    // 2. session + listeners（所有微信操作的唯一入口；P2 任务 8b：
+    // delayMinMs/MaxMs 接线，非法配置内部回退默认）
+    let session = Arc::new(WxSession::with_gaps(
+        sidecar.clone(),
+        cfg.delay_min_ms,
+        cfg.delay_max_ms,
+    ));
     let listeners = Arc::new(ListenerRegistry::new(session.clone()));
     // 3. 状态机 + Supervisor（sidecar 崩溃退避重启 + init 序列 + 状态推进）
     let state = Arc::new(AppStateMachine::new());
