@@ -16,12 +16,33 @@ use rand::Rng;
 
 use crate::sidecar::protocol::RpcError;
 use crate::sidecar::spec::methods;
-use crate::sidecar::SidecarHandle;
+use crate::sidecar::{SidecarHandle, RPC_TIMEOUT};
 
 /// 操作间拟人延时下限
 const MIN_GAP: Duration = Duration::from_millis(500);
 /// 操作间拟人延时上限
 const MAX_GAP: Duration = Duration::from_millis(1000);
+
+/// 读类 action 超时后的重试间隔（P2 任务 7；对齐 wx.init 重试的
+/// 「慢热」形态：第一发超时的同时 sidecar 已在推进，间隔给足时间）
+const READ_RETRY_GAP: Duration = Duration::from_millis(800);
+
+/// 读类 action 判定（P2 任务 7）：只查不改微信状态的 8 个 action，
+/// 重放无副作用 → 超时可幂等重试。写类（send/accept/listen 增删/
+/// publish/forward...）重放即重复发消息/重复加监听，永不重试。
+pub fn is_read_only(action: &str) -> bool {
+    matches!(
+        action,
+        "get_my_info"
+            | "get_friend_requests"
+            | "list_listen_chats"
+            | "search_chat"
+            | "get_chat_history"
+            | "get_moments"
+            | "download_media"
+            | "voice_to_text"
+    )
+}
 
 /// 微信会话：包住 sidecar 句柄，串行执行所有微信操作
 pub struct WxSession {
@@ -41,18 +62,54 @@ impl WxSession {
 
     /// 执行一条 WS action（16 个之一）；内部映射 sidecar 方法并串行化
     pub async fn execute(&self, action: &str, params: Value) -> Result<Value, RpcError> {
+        // 读类超时重试（P2 任务 7）：UIA 偶发慢不该让整条只读指令失败；
+        // 生产参数 = RPC_TIMEOUT + READ_RETRY_GAP
+        self.execute_with_retry(action, params, RPC_TIMEOUT, READ_RETRY_GAP)
+            .await
+    }
+
+    /// execute 的注入化内核（测试用短超时/间隔驱动重试路径）：
+    /// 读类 action 首发 Timeout → 等 retry_gap 再试 1 发，仍 Timeout 即 Err。
+    /// 写类不重试；Sidecar/Io/Closed 错误不重试（确定性失败/进程级死亡，
+    /// 与 state.rs wx_init_with_retry 的裁定一致）。
+    pub async fn execute_with_retry(
+        &self,
+        action: &str,
+        params: Value,
+        timeout: Duration,
+        retry_gap: Duration,
+    ) -> Result<Value, RpcError> {
         // 先映射再排队：未知 action 直接拒绝，不占用队列
         let method = map_action(action)
             .ok_or_else(|| RpcError::Sidecar(format!("未知 action: {action}")))?;
         // 串行：拿队列锁 → 执行 → 拟人间隙 → 释放（guard 在函数退出时 drop）
         let _guard = self.queue.lock().await;
         let sidecar_params = transform_params(action, params);
-        let result = self
-            .sidecar
-            .lock()
-            .await
-            .call(method, sidecar_params)
-            .await?;
+        let call = |timeout: Duration| {
+            let sidecar_params = sidecar_params.clone();
+            async move {
+                self.sidecar
+                    .lock()
+                    .await
+                    .call_with_timeout(method, sidecar_params, timeout)
+                    .await
+            }
+        };
+        let result = match call(timeout).await {
+            Err(RpcError::Timeout) if is_read_only(action) => {
+                tracing::warn!(action, "读类 action 超时，{}ms 后重试 1 发", retry_gap.as_millis());
+                tokio::time::sleep(retry_gap).await;
+                match call(timeout).await {
+                    Ok(v) => v,
+                    Err(RpcError::Timeout) => {
+                        tracing::error!(action, "读类 action 重试仍超时，放弃");
+                        return Err(RpcError::Timeout);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            r => r?,
+        };
         let gap = rand_gap();
         tokio::time::sleep(gap).await;
         Ok(result)
@@ -227,6 +284,37 @@ mod tests {
             let g = rand_gap();
             assert!(g >= MIN_GAP && g <= MAX_GAP, "gap 越界: {g:?}");
         }
+    }
+
+    /// 读类白名单：8 个只读 action 可重试，全部写类 action 不可
+    #[test]
+    fn test_is_read_only_classification() {
+        for a in [
+            "get_my_info",
+            "get_friend_requests",
+            "list_listen_chats",
+            "search_chat",
+            "get_chat_history",
+            "get_moments",
+            "download_media",
+            "voice_to_text",
+        ] {
+            assert!(is_read_only(a), "{a} 应判读类（可重试）");
+        }
+        for a in [
+            "send_message",
+            "send_file",
+            "quote_reply",
+            "forward_message",
+            "accept_friend",
+            "add_listen_chat",
+            "remove_listen_chat",
+            "publish_moment",
+        ] {
+            assert!(!is_read_only(a), "{a} 应判写类（不重试）");
+        }
+        assert!(!is_read_only("chat_open"), "白名单外 action 判写类");
+        assert!(!is_read_only(""), "空 action 判写类");
     }
 
     /// 参数适配：get_chat_history 缺省 n=20 / get_moments 缺省 count=10 / 其余原样透传
