@@ -65,7 +65,7 @@ impl Outbox {
             Inner::File { path, entries } => (path, entries),
             Inner::Disabled => return false,
         };
-        let Some(event_id) = frame["eventId"].as_str() else {
+        let Some(event_id) = frame["eventId"].as_str().filter(|s| !s.is_empty()) else {
             return false;
         };
         if !matches!(
@@ -80,6 +80,8 @@ impl Outbox {
             ts: now_ms(),
             frame: frame.clone(),
         };
+        // 文件 IO 收进锁临界区：这里的 append 与 ack 的 tmp+rename 固定文件名
+        // 并发交错会丢行/坏行，全部写经进程内 Mutex 串行化（IO 毫秒级，可接受）
         let mut list = lock_entries(entries);
         list.push(entry.clone());
         // 超容丢最旧（仅内存；磁盘多余行由后续 open/ack 重写自愈）
@@ -88,16 +90,20 @@ impl Outbox {
             list.drain(0..drop_n);
             tracing::warn!(dropped = drop_n, "outbox 超容修剪（丢最旧）");
         }
-        drop(list);
         // append 单行（磁盘失败不阻断：内存已是真相，后续 ack 触发整文件重写自愈）
-        let line = serde_json::to_string(&entry).unwrap_or_default();
-        let append = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut f| f.write_all(format!("{line}\n").as_bytes()));
-        if let Err(e) = append {
-            tracing::error!(%e, path = %path.display(), "outbox 落盘失败（内存保留，重写自愈）");
+        match serde_json::to_string(&entry) {
+            Ok(line) => {
+                let append = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut f| f.write_all(format!("{line}\n").as_bytes()));
+                if let Err(e) = append {
+                    tracing::error!(%e, path = %path.display(), "outbox 落盘失败（内存保留，重写自愈）");
+                }
+            }
+            // 序列化失败：跳过 append（内存已保留，返回值语义不变）
+            Err(e) => tracing::warn!(%e, "outbox 条目序列化失败，跳过落盘"),
         }
         true
     }
@@ -114,9 +120,9 @@ impl Outbox {
         if list.len() == before {
             return false;
         }
-        let snapshot = list.clone();
-        drop(list);
-        Self::rewrite(path, &snapshot);
+        // 整文件重写收进锁临界区：固定 tmp 名的 rename 与并发 enqueue 的
+        // append 交错会丢行/坏行，须与所有文件写同经 Mutex 串行化
+        Self::rewrite(path, &list);
         true
     }
 
@@ -158,14 +164,19 @@ impl Outbox {
         Ok(out)
     }
 
-    /// 整文件原子重写（tmp + rename；失败记 error 不上抛）
+    /// 整文件原子重写（tmp + rename；失败记 error 不上抛）。
+    /// 调用方须已持有 entries 锁（临界区内完成全部文件 IO，防交错）
     fn rewrite(path: &Path, entries: &[Entry]) {
         let tmp = path.with_extension("jsonl.tmp");
         let mut body = String::new();
         for e in entries {
-            if let Ok(line) = serde_json::to_string(e) {
-                body.push_str(&line);
-                body.push('\n');
+            match serde_json::to_string(e) {
+                Ok(line) => {
+                    body.push_str(&line);
+                    body.push('\n');
+                }
+                // 序列化失败：跳行 warn（内存条目仍在，下次重写再尝试）
+                Err(err) => tracing::warn!(%err, event_id = %e.event_id, "outbox 重写时条目序列化失败，跳过该行"),
             }
         }
         if let Err(e) = fs::write(&tmp, body).and_then(|_| fs::rename(&tmp, path)) {
