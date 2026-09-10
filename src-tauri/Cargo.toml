@@ -21,6 +21,8 @@ dirs = "6"
 # 注意：reqwest 0.13 起 feature 由 0.12 的 rustls-tls 改名 rustls
 # （0.13 的 default-tls 即 = rustls，纯 Rust TLS 已是默认路径）
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+# webhook URL 脱敏解析（I2）：reqwest 传递引入 url，显式声明直接依赖
+url = "2"
 # token 持久化：Windows Credential Manager / macOS Keychain / Linux Secret Service
 # keyring 3.x 无 default features：不指定平台后端 = 全平台落到 mock store
 # （EntryOnly：值挂在 Entry 实例内存，跨 Entry::new 不可见）——生产表现为

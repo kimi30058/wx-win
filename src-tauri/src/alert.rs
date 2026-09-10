@@ -21,6 +21,18 @@ pub fn hostname() -> String {
         .unwrap_or_default()
 }
 
+/// webhook URL 脱敏（同 cli::mask_token 口径）：保留 scheme+host 与尾 4 字符——
+/// 排障可定位配置、不泄 hook 凭证（URL 即飞书系 bot 的 bearer）
+fn mask_webhook_url(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(u) => {
+            let tail: String = url.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+            format!("{}://{}...{}", u.scheme(), u.host_str().unwrap_or("?"), tail)
+        }
+        Err(_) => "<invalid-url>".to_string(),
+    }
+}
+
 pub struct AlertClient {
     url: String,
     template: String,
@@ -74,9 +86,9 @@ impl AlertClient {
         .await
         {
             Err(_) => {
-                tracing::warn!(url = %self.url, title = %title, "告警发送超时({SEND_TIMEOUT_SECS}s)丢弃")
+                tracing::warn!(url = %mask_webhook_url(&self.url), title = %title, "告警发送超时({SEND_TIMEOUT_SECS}s)丢弃")
             }
-            Ok(Err(e)) => tracing::warn!(url = %self.url, title = %title, "告警发送失败: {e}"),
+            Ok(Err(e)) => tracing::warn!(url = %mask_webhook_url(&self.url), title = %title, "告警发送失败: {e}"),
             Ok(Ok(resp)) => {
                 // 应用层拒绝识别（飞书等 200 但 code≠0）：读 body 判 code
                 let status = resp.status();
@@ -207,5 +219,15 @@ mod tests {
     fn test_send_noop_on_empty_url() {
         let c = AlertClient::new(String::new(), String::new(), "dev".into());
         c.send("t", "d"); // 不应 panic
+    }
+
+    /// webhook URL 脱敏：host 可见、凭证中段截断（I2）
+    #[test]
+    fn test_mask_webhook_url() {
+        let m = mask_webhook_url("https://open.feishu.cn/open-apis/bot/v2/hook/abcdef123456");
+        assert!(m.starts_with("https://open.feishu.cn..."));
+        assert!(m.ends_with("3456"));
+        assert!(!m.contains("abcdef12"), "中段凭证不得泄露");
+        assert_eq!(mask_webhook_url("not a url"), "<invalid-url>");
     }
 }
