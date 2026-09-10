@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - 所有代码注释与用户可见文案用简体中文。
-- **基于 HEAD（41c21bc）开发**：主 checkout 工作区有另一主题未提交改动（methods.py/test_methods.py，UIA 诊断化）——worktree 从 HEAD 分出，所有行号/代码快照以 HEAD 为准，**不要参考主 checkout 工作区里的 methods.py**。
+- **基于 HEAD（9748963）开发**：此前 spec 撰写期间有并行会话合入 4 个 P2 提交（chat.open 退役 a617907 / delay 接线 3181069 / channelId 进 hello 0c78714 / CA 证书持久化 ad70b00）与 2 个 P0 spec/plan 草稿（未跟踪文件 listen-persist-event-outbox，尚未实现）——本计划已对这些快照对齐（Task 1/3 的 methods.py 行号偏移、Task 8 的 start_link 已含 set_channel_id 行）。worktree 从**当时最新 main** 分出；执行前 `git log --oneline -3` 核对基准，若 main 又前移（尤其 P0 落地会动 methods.py/ws.rs/config.rs），先重读受影响 Task 的文件现状再动笔。
 - Rust core（src-tauri/src/ 下 lib.rs 声明的模块）禁依赖 tauri；GUI 装配在 bin 层（app_state.rs/commands.rs）。
 - 禁 `unwrap()` 于运行时路径（测试代码可）；锁中毒一律 `unwrap_or_else(PoisonError::into_inner)` 恢复。
 - Python 测试跑法：`cd sidecar-python && python3 -m pytest test_methods.py -x -q`（全量 94 例 <1s）。
@@ -209,7 +209,7 @@ git commit -m "feat(link): isAt 上行透传——RawMessage 契约扩 is_at(ser
 ### Task 3: 消息上行去重——原生 id 透传（幂等键）
 
 **Files:**
-- Modify: `sidecar-python/methods.py`（`_listen_add` 内 `on_msg` 回调，HEAD line 518-527）
+- Modify: `sidecar-python/methods.py`（`_listen_add` 内 `on_msg` 回调，现行 line 511-527；`mid = uuid.uuid4().hex[:12]` 在 line 518）
 - Test: `sidecar-python/test_methods.py`
 
 **Interfaces:**
@@ -1200,7 +1200,7 @@ Expected: FAIL——编译错 `alert_sink` 字段私有不可测试访问 + `set
 
 3. Assembled 构造字面量加 `alert,`（bridge 之前）。
 
-4. start_link（HEAD line 233，`impl Assembled` 块内——`self` 即 Assembled）：set_command_sink 块之后补注入：
+4. start_link（`impl Assembled` 块内——`self` 即 Assembled；现行代码在构造 link 后有 P2 的 `link.set_channel_id(...)` 行）：set_command_sink 块之后补注入：
 
 ```rust
         // webhook 告警（心跳掉线/恢复挂点）：Assembled.alert 与状态机挂点同源
