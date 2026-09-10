@@ -12,6 +12,10 @@
       <template #msgType="{ row }">
         <t-tag size="small" variant="outline">{{ row.msgType || 'unknown' }}</t-tag>
       </template>
+      <template #at="{ row }">
+        <t-tag v-if="row.isAt" size="small" theme="warning" variant="light">是</t-tag>
+        <span v-else>-</span>
+      </template>
     </t-table>
   </t-card>
 </template>
@@ -31,6 +35,7 @@ const columns: PrimaryTableCol<MessageItem>[] = [
   { colKey: 'chatType', title: '会话类型', width: 100 },
   { colKey: 'sender', title: '发送人', width: 140, ellipsis: true },
   { colKey: 'msgType', title: '类型', width: 90 },
+  { colKey: 'isAt', title: '@我', width: 70, cell: 'at' },
   { colKey: 'content', title: '内容摘要', ellipsis: true },
 ];
 

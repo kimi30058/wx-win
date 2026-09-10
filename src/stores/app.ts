@@ -82,6 +82,8 @@ export interface MessageItem {
   sender: string;
   msgType: string;
   content: string;
+  /** 群内 @机器人 标记（event:message data.isAt） */
+  isAt: boolean;
   ts: number;
 }
 
@@ -190,6 +192,7 @@ function parseMessageItem(v: unknown): MessageItem {
     sender: str(r.sender),
     msgType: str(r.msgType),
     content: str(r.content),
+    isAt: r.isAt === true,
     ts: num(r.ts) || Date.now(),
   };
 }

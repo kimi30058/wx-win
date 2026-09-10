@@ -17,7 +17,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, args?: unknown) => invokeMock(cmd, args),
 }));
 
-import { useAppStore, APP_LOG_RING_LIMIT } from './app';
+import { useAppStore, APP_LOG_RING_LIMIT, type MessageItem } from './app';
 
 describe('appLog', () => {
   it('pushAppLog 头插且环形淘汰', () => {
@@ -43,6 +43,15 @@ describe('appLog', () => {
     store.pushAppLog({ ts: 1, level: 'fatal', source: 'ghost', message: 'x' });
     expect(store.appLog[0].level).toBe('info');
     expect(store.appLog[0].source).toBe('rust');
+  });
+
+  it('pushMessage 保留 isAt 字段（群@语义透传）', () => {
+    const store = useAppStore();
+    store.pushMessage({
+      id: 0, chatName: '客户群', chatType: 'group', sender: '李四',
+      msgType: 'text', content: '@机器人 报价', ts: 1, isAt: true,
+    } as MessageItem);
+    expect(store.messages[0].isAt).toBe(true);
   });
 });
 
