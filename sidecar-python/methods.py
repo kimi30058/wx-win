@@ -516,7 +516,10 @@ def _listen_add(params, wx, msg_pool, msg_pool_ts, notify, mock):
         消息归属会话（msg 对象本身无 who 属性，附录 A）。
         """
         try:
-            mid = uuid.uuid4().hex[:12]
+            # 原生 id 优先（确定性幂等键——Server 可按 msg_id 去重；
+            # 同一消息重复回调命中同一池键，二次 RPC 不重复触发）。
+            # 旧版 wxautox4 msg 无 id 属性 → 退回随机 uuid（不劣于现状）。
+            mid = str(getattr(msg, "id", "")).strip() or uuid.uuid4().hex[:12]
             _pool_put(msg_pool, msg_pool_ts, mid, msg, str(getattr(chat, "who", "")))
             notify("message.received", _raw_message(msg, chat, mid))
         except Exception as e:  # noqa: BLE001 — 回调内异常上抛会杀 wxautox4 监听线程

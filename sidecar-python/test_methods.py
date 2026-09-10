@@ -653,6 +653,34 @@ def test_listen_callback_fires_notification_with_msg_id(fakewx):
     assert params["is_at"] is False  # FakeMsg 默认 is_at=False 透传
 
 
+def test_listen_callback_msg_id_prefers_native_id(fakewx):
+    """msg_id 优先取 wxautox 原生 id（确定性幂等键——Server 可按 msg_id 去重）"""
+    notifications = []
+    msg_pool, msg_pool_ts = {}, {}
+    _dispatch("listen.add", {"nickname": "客户群"}, fakewx,
+              notify=lambda m, p: notifications.append((m, p)),
+              msg_pool=msg_pool, msg_pool_ts=msg_pool_ts)
+    msg = FakeMsg(content="原生id消息")
+    msg.id = "native_7788"
+    fakewx.listen_reg["客户群"](msg, FakeChat("客户群"))
+    assert notifications[0][1]["msg_id"] == "native_7788"
+    assert "native_7788" in msg_pool  # 池键同步确定性
+
+
+def test_listen_callback_msg_id_falls_back_to_uuid(fakewx):
+    """旧版 wxautox4 msg 无 id 属性：退回随机 uuid（12 hex），行为不劣于现状"""
+    notifications = []
+    msg_pool, msg_pool_ts = {}, {}
+    _dispatch("listen.add", {"nickname": "客户群"}, fakewx,
+              notify=lambda m, p: notifications.append((m, p)),
+              msg_pool=msg_pool, msg_pool_ts=msg_pool_ts)
+    msg = FakeMsg(content="无id消息")
+    del msg.id  # 旧库无此属性
+    fakewx.listen_reg["客户群"](msg, FakeChat("客户群"))
+    mid = notifications[0][1]["msg_id"]
+    assert len(mid) == 12 and all(c in "0123456789abcdef" for c in mid)
+
+
 def test_listen_callback_passes_is_at_true(fakewx):
     """群内 @机器人消息：msg.is_at=True 透传到通知帧（硬编码 false 的矫正）"""
     notifications = []
