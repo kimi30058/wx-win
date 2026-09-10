@@ -115,6 +115,10 @@ pub fn render_payload(template: &str, title: &str, detail: &str, ts: u64, device
     if !t.is_empty() {
         match serde_json::from_str::<Value>(t) {
             Ok(mut v) => {
+                if !v.is_object() {
+                    tracing::warn!("告警模板非 JSON 对象（裸标量/数组），降级通用格式");
+                    return json!({ "title": title, "detail": detail, "ts": ts, "device": device });
+                }
                 apply_placeholders(&mut v, title, detail, ts, device);
                 return v;
             }
@@ -163,10 +167,11 @@ mod tests {
     /// 飞书模板：msg_type/text/content 嵌套结构，占位符在深层字符串里
     #[test]
     fn test_render_payload_feishu_template() {
-        let tpl = r#"{"msg_type":"text","content":{"text":"【{title}】{device}\n{detail}"}}"#;
+        let tpl = r#"{"msg_type":"text","content":{"text":"【{title}】{device}\n{detail}@{ts}"}}"#;
         let v = render_payload(tpl, "微信掉线", "设备掉线", 1700000000, "wx-rig-01");
         assert_eq!(v["msg_type"], "text");
-        assert_eq!(v["content"]["text"], "【微信掉线】wx-rig-01\n设备掉线");
+        assert_eq!(v["content"]["text"], "【微信掉线】wx-rig-01\n设备掉线@1700000000");
+        assert!(v["content"]["text"].as_str().unwrap().contains("1700000000"), "ts 占位符必须被替换");
     }
 
     /// detail 含引号+换行的 traceback 样本：渲染结果仍是合法 JSON 且值完整
@@ -229,5 +234,13 @@ mod tests {
         assert!(m.ends_with("3456"));
         assert!(!m.contains("abcdef12"), "中段凭证不得泄露");
         assert_eq!(mask_webhook_url("not a url"), "<invalid-url>");
+    }
+
+    /// 模板是合法 JSON 但非对象（数组）→ 降级通用 JSON（T5 守卫）
+    #[test]
+    fn test_render_payload_non_object_template_falls_back() {
+        let v = render_payload("[\"{title}\"]", "t", "d", 1, "dev");
+        assert_eq!(v["title"], "t");
+        assert_eq!(v["detail"], "d");
     }
 }

@@ -109,7 +109,7 @@ describe('Settings 表单校验与保存', () => {
       (i.element as HTMLInputElement).value.includes('feishu'),
     );
     expect(urlInput).toBeTruthy();
-    // 提交：填 token 触发完整保存链
+    // 提交：token 留空场景——webhook 字段仍必须透传（后端无条件合并）
     wrapper.find('form').trigger('submit');
     await flushPromises();
     const call = invokeMock.mock.calls.find((c) => c[0] === 'save_config');

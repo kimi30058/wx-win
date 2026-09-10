@@ -16,10 +16,9 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 rand = "0.8"
 dirs = "6"
-# webhook 告警（2026-09-10 P1）：tauri 传递已引入 reqwest 0.13 但未激活
-# TLS 后端——显式 rustls（纯 Rust TLS，Windows 打包无 OpenSSL 依赖）。
-# 注意：reqwest 0.13 起 feature 由 0.12 的 rustls-tls 改名 rustls
-# （0.13 的 default-tls 即 = rustls，纯 Rust TLS 已是默认路径）
+# webhook 告警（2026-09-10 P1）：显式 rustls feature。
+# 注意：0.13 的 rustls 实际启用 aws-lc-rs provider，含 C 编译单元；
+# Windows MSVC 需 CMake/NASM——push 后首跑 build-windows.yml 验证。
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 # webhook URL 脱敏解析（I2）：reqwest 传递引入 url，显式声明直接依赖
 url = "2"
