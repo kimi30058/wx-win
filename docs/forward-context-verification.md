@@ -59,6 +59,8 @@ GetAllMessage 遍历期间的监听回调活动）。
 - 定位成功但 forward 抛 UIA 超时 → H2 成立：遍历期间回调扰动使
   控件引用失效。修复方向：locate 后补 ChatWith(who=sourceWho)+sleep 1
   再 forward（与池直取路径同款缓解）。
+- 交叉判读：B 败 A 成 → 偏 H2（遍历扰动）；A B 同败 → 偏 H1
+  （预切换不等价）。
 
 ## 链路 C（顺带观察）：quote 无预切换
 
@@ -69,8 +71,14 @@ GetAllMessage 遍历期间的监听回调活动）。
    `{"msgId": "<M 的 msg_id>", "text": "收到"}`
 2. 观察群内是否出现引用回复。
 
-**预期**：成功。若失败抛 UIA 超时 → H3 成立，同款 ChatWith 预切换
-补进 _msg_quote。
+**预期**：群内出现**引用回复**（消息带引用 M 的样式）。
+
+**失败特征与裁决**：引用回复未出现，群里出现的是**普通文本消息**
+「收到」+ sidecar 日志出现 `WARN quote 失败(...)降级普通发送` +
+指令日志 ok=true 且带 degraded 标记 → H3 成立（quote 同样受监听
+上下文影响，被降级路径吞掉）。注意 `_msg_quote` 内 `except Exception`
+全吞异常不上抛，**唯一信号就是降级形态**——真机不可能观察到
+「抛 UIA 超时」。成立后同款 ChatWith 预切换补进 _msg_quote。
 
 ## 结果记录
 
