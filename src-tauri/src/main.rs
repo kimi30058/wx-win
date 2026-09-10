@@ -41,6 +41,7 @@ use tokio::sync::Mutex;
 use wxauto_desktop::agent_link::AgentLink;
 use wxauto_desktop::cli::{build_ws_url, graceful_shutdown, wait_for_sigint};
 use wxauto_desktop::config::{default_config_path, load_config};
+use wxauto_desktop::outbox::Outbox;
 use wxauto_desktop::sidecar::SidecarHandle;
 use wxauto_desktop::state::{AppStateMachine, Supervisor};
 use wxauto_desktop::wx::listener::ListenerRegistry;
@@ -133,6 +134,16 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
     // 4. AgentLink（WS 主循环 + 通知/心跳/好友轮询三泵，run 内部自 spawn）
     let link = Arc::new(AgentLink::new(session.clone(), listeners.clone(), url));
+    // outbox 装配：事件先落盘后发送（CLI 与 GUI 同路径，spec §4.2）。
+    // 打开失败降级 disabled（不阻断启动——只损失补发能力不损失实时上报）
+    let outbox = match Outbox::open(&default_config_path().with_file_name("outbox.jsonl")) {
+        Ok(ob) => Arc::new(ob),
+        Err(e) => {
+            tracing::error!("outbox 打开失败，事件不落盘（不阻断启动）: {e}");
+            Arc::new(Outbox::disabled())
+        }
+    };
+    link.set_outbox(outbox);
     // P2 任务 8c：hello 帧带 channelId（排障用；身份判定仍在 token JWT）
     link.set_channel_id(cfg.channel_id.clone());
     tokio::spawn({

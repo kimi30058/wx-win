@@ -88,7 +88,16 @@ cat "$SMOKE_LOG"
 echo "===== CLI 日志（尾部 40 行） ====="
 tail -40 "$CLI_LOG"
 
-# 5. 残留进程断言：CLI 退出后不允许再有 sidecar python 进程挂着。
+# 5. outbox 断言：冒烟全程事件被 ack 清除（文件不存在或空）
+OUTBOX="$HOME/.wxauto-desktop/outbox.jsonl"
+if [ -s "$OUTBOX" ]; then
+    echo "[smoke] FAIL: outbox 残留积压（事件未被 ack）: $(wc -l < "$OUTBOX") 行"
+    cat "$OUTBOX"
+    exit 1
+fi
+echo "[smoke] outbox 残留断言 PASS（文件空/不存在）"
+
+# 6. 残留进程断言：CLI 退出后不允许再有 sidecar python 进程挂着。
 #    匹配模式锚定 python 解释器 + 脚本路径（^python3?），排除 pgrep 自身与
 #    外层 bash -c 包装（其 cmdline 含整段脚本文本会误匹配）
 RESIDUAL=$(pgrep -f "^python3? .*/sidecar-python/sidecar\.py" || true)

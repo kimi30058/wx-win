@@ -25,6 +25,7 @@ use tokio::sync::{Mutex, RwLock};
 use wxauto_desktop::agent_link::AgentLink;
 use wxauto_desktop::cli::build_ws_url;
 use wxauto_desktop::config::{self, Config};
+use wxauto_desktop::outbox::Outbox;
 use wxauto_desktop::sidecar::SidecarHandle;
 use wxauto_desktop::state::{AppStateMachine, Supervisor};
 use wxauto_desktop::wx::listener::ListenerRegistry;
@@ -141,6 +142,9 @@ pub struct Assembled {
     link_ops: tokio::sync::Mutex<()>,
     /// 前端事件桥（start_link 注 sink 用）
     pub bridge: UiEventBridge,
+    /// 事件发件箱（spec §4.2：事件先落盘后发送；ack 清除 + 重连补发）。
+    /// start_link 注入 link——GUI 每次 connect 重建 link 都重新接线
+    pub outbox: Arc<Outbox>,
 }
 
 impl Assembled {
@@ -190,6 +194,8 @@ for line in sys.stdin:
             link,
             link_ops: tokio::sync::Mutex::new(()),
             bridge: UiEventBridge::new(),
+            // 测试装配不落盘——outbox 全 no-op（Disabled 形态）
+            outbox: Arc::new(Outbox::disabled()),
         }))
     }
 
@@ -248,6 +254,9 @@ for line in sys.stdin:
         ));
         // P2 任务 8c：hello 帧带 channelId（配置快照注入；重连复用同值）
         link.set_channel_id(self.config.read().await.channel_id.clone());
+        // outbox 注入（spec §4.2：事件先落盘后发送 + ack 清除 + 重连补发；
+        // 每次 connect 重建 link 都重新接线——发件箱本体跨连接复用）
+        link.set_outbox(self.outbox.clone());
         // 双 sink：event 帧（status 组装 wsConnected）+ 指令日志
         {
             let bridge = self.bridge.clone();
@@ -389,6 +398,16 @@ impl AppStateCtx {
                         config_path.clone(),
                     ))
                     .await;
+                // outbox 装配（spec §4.2）：事件先落盘后发送。打开失败降级
+                // disabled（不阻断启动——发件箱故障只损失补发能力，
+                // 不损失实时上报）。路径与 config.json 同目录
+                let outbox = match Outbox::open(&config_path.with_file_name("outbox.jsonl")) {
+                    Ok(ob) => Arc::new(ob),
+                    Err(e) => {
+                        tracing::error!("outbox 打开失败，事件不落盘（不阻断启动）: {e}");
+                        Arc::new(Outbox::disabled())
+                    }
+                };
                 // 3. 状态机（注入 on_change：六态变化 → wxauto://state。
                 //    bridge 已在 shell 阶段 attach——首事件不丢，问题 B 消除）
                 let state_machine = {
@@ -448,6 +467,7 @@ impl AppStateCtx {
                     link,
                     link_ops: tokio::sync::Mutex::new(()),
                     bridge,
+                    outbox,
                 }))
             })
             .await

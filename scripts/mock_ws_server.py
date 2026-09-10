@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from urllib.parse import parse_qs, urlparse
 
 from websockets.asyncio.server import serve
@@ -94,7 +95,16 @@ async def handle(ws):
                     return
                 result.ok("hello 首帧 + command(result) 闭环校验通过")
                 return  # 校验完成，主动断开
-            # event / ping 只记录
+            elif kind == "event":
+                # ack 回送（listen-persist-event-outbox：设备发件箱据此清除）
+                event_id = frame.get("eventId")
+                if event_id:
+                    await ws.send(json.dumps({
+                        "kind": "ack",
+                        "eventId": event_id,
+                        "ts": int(time.time() * 1000),
+                    }, ensure_ascii=False))
+            # ping 只记录
     except ConnectionClosed:
         pass
 
