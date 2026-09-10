@@ -58,6 +58,10 @@ pub struct RawMessage {
     pub msg_type: String,  // 'text' | 'image' | 'voice' | ...
     pub sender: String,
     pub content: String,
+    /// 群内 @机器人标记（2026-09-10 P1：wxautox msg.is_at 透传；
+    /// 旧 sidecar 帧无此键——default false 向后兼容）
+    #[serde(default)]
+    pub is_at: bool,
 }
 
 #[cfg(test)]
@@ -100,12 +104,25 @@ mod tests {
             msg_type: "text".into(),
             sender: "wxid_abc".into(),
             content: "你好".into(),
+            is_at: true,
         };
         let v = serde_json::to_value(&m).expect("序列化失败");
         assert_eq!(v["msg_id"], "m1");
         assert_eq!(v["chat_who"], "wxid_abc");
         let back: RawMessage = serde_json::from_value(v).expect("反序列化失败");
         assert_eq!(back.content, "你好");
+        assert_eq!(back.is_at, true);
+    }
+
+    /// 旧 sidecar 帧无 is_at 键——serde default false 向后兼容
+    #[test]
+    fn test_raw_message_is_at_default_false_on_legacy_frame() {
+        let v = serde_json::json!({
+            "msg_id": "m1", "chat_who": "wxid_abc", "chat_type": "friend",
+            "attr": "friend", "msg_type": "text", "sender": "wxid_abc", "content": "你好"
+        });
+        let m: RawMessage = serde_json::from_value(v).expect("旧帧反序列化失败");
+        assert_eq!(m.is_at, false, "缺 is_at 键应 default false");
     }
 
     /// InitResult failReason 契约：camelCase rename + 缺字段向后兼容（Task 3 I1）

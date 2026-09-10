@@ -40,7 +40,7 @@ pub fn message_event_from_notification(
             "msgType": n["msg_type"].as_str().unwrap_or("text"),
             "sender": n["sender"].as_str().unwrap_or_default(),
             "content": content,
-            "isAt": false,
+            "isAt": n["is_at"].as_bool().unwrap_or(false),
             "downloadedMedia": downloaded_media.unwrap_or(""),
         },
         "eventId": next_event_id(),

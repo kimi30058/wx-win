@@ -121,7 +121,7 @@ async fn test_command_tracker_independent_ids() {
 fn test_message_event_from_notification_camel() {
     let params = json!({
         "msg_id": "m1", "chat_who": "张三", "chat_type": "group", "attr": "friend",
-        "msg_type": "image", "sender": "李四", "content": "[图片]"
+        "msg_type": "image", "sender": "李四", "content": "[图片]", "is_at": true
     });
     let f = message_event_from_notification(&params, Some("C:/x.png"), None);
     assert_eq!(f["kind"], "event");
@@ -132,7 +132,7 @@ fn test_message_event_from_notification_camel() {
     assert_eq!(f["data"]["msgType"], "image");
     assert_eq!(f["data"]["sender"], "李四");
     assert_eq!(f["data"]["content"], "[图片]");
-    assert_eq!(f["data"]["isAt"], false);
+    assert_eq!(f["data"]["isAt"], true);
     assert_eq!(f["data"]["downloadedMedia"], "C:/x.png");
     assert!(f["ts"].as_u64().expect("ts 应为数字") > 0);
 }
@@ -159,6 +159,10 @@ fn test_message_event_voice_overwrite_and_defaults() {
     assert_eq!(f3["data"]["attr"], "friend");
     assert_eq!(f3["data"]["chatType"], "friend");
     assert_eq!(f3["data"]["content"], "");
+
+    // 旧 sidecar 帧缺 is_at 键 → isAt 兜底 false
+    let f4 = message_event_from_notification(&json!({}), None, None);
+    assert_eq!(f4["data"]["isAt"], false);
 }
 
 /// friend_request / status 事件帧字段
