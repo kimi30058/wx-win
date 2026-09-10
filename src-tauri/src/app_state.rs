@@ -115,8 +115,11 @@ fn slot_write(slot: &LinkSlot) -> std::sync::RwLockWriteGuard<'_, Option<Arc<Age
 
 /// 装配完成后的运行件集合（AppStateCtx.inner 的 Ok 载荷）
 pub struct Assembled {
-    /// 当前配置（GUI 保存按字段合并；connect 时读 serverUrl）
-    pub config: RwLock<Config>,
+    /// 当前配置（GUI 保存按字段合并；connect 时读 serverUrl）。
+    /// 共享锁（Task 3）：persist hook 与 save_settings 经同一把内存锁
+    /// 串行化——监听名单落盘与设置保存共享同一份内存真相，任一写入
+    /// 路径都不会用旧快照覆盖对方（spec §4.1 不变量）
+    pub config: Arc<RwLock<Config>>,
     /// 监听名单注册表（Listen 页 CRUD 入口）
     pub listeners: Arc<ListenerRegistry>,
     /// 微信会话（manual_execute 与 agent 指令共用串行队列）
@@ -174,10 +177,10 @@ for line in sys.stdin:
         ));
         let link: LinkSlot = Arc::new(std::sync::RwLock::new(None));
         Ok(Arc::new(Assembled {
-            config: RwLock::new(Config {
+            config: Arc::new(RwLock::new(Config {
                 server_url: url,
                 ..Config::default()
-            }),
+            })),
             listeners,
             session,
             state_machine,
@@ -366,13 +369,26 @@ impl AppStateCtx {
                     .map_err(|e| format!("sidecar 启动失败: {e}"))?;
                 let sidecar = Arc::new(Mutex::new(sidecar));
                 // 2. session + listeners（P2 任务 8b：delayMinMs/MaxMs 接线——
-                // 配置的拟人间隙经 sanitize 后生效，非法值回退默认 500~1000ms）
+                // 配置的拟人间隙经 sanitize 后生效，非法值回退默认 500~1000ms）。
+                // 共享配置锁（Task 3）：persist hook 与 save_settings 经同一把锁
+                // 串行化（spec §4.1 不变量）——listeners 种子恢复 + hook 注入
+                // 都走 cfg_lock，Assembled.config 即 cfg_lock 本体
                 let session = Arc::new(WxSession::with_gaps(
                     sidecar.clone(),
                     cfg.delay_min_ms,
                     cfg.delay_max_ms,
                 ));
-                let listeners = Arc::new(ListenerRegistry::new(session.clone()));
+                let cfg_lock = Arc::new(RwLock::new(cfg));
+                let listeners = Arc::new(ListenerRegistry::new_seeded(
+                    session.clone(),
+                    cfg_lock.read().await.listen_names.clone(),
+                ));
+                listeners
+                    .set_persist_hook(wxauto_desktop::wx::listener::file_persist_hook(
+                        cfg_lock.clone(),
+                        config_path.clone(),
+                    ))
+                    .await;
                 // 3. 状态机（注入 on_change：六态变化 → wxauto://state。
                 //    bridge 已在 shell 阶段 attach——首事件不丢，问题 B 消除）
                 let state_machine = {
@@ -422,7 +438,7 @@ impl AppStateCtx {
                 };
 
                 Ok(Arc::new(Assembled {
-                    config: RwLock::new(cfg),
+                    config: cfg_lock,
                     listeners,
                     session,
                     state_machine,
