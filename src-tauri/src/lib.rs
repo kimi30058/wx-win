@@ -5,6 +5,7 @@
 //! （sidecar/wx/transport/agent_link/state 不引 tauri）。bin 单测
 //! （cargo test 默认含 bin target）覆盖 GUI 装配的纯逻辑部分。
 pub mod agent_link;
+pub mod alert;
 pub mod bootstrap;
 pub mod cli;
 pub mod config;
