@@ -12,6 +12,15 @@ use serde_json::{json, Value};
 /// 发送超时（spec：5s）
 const SEND_TIMEOUT_SECS: u64 = 5;
 
+/// 主机名（Windows COMPUTERNAME 优先，兼容 HOSTNAME；取不到为空）。
+/// 自 agent_link 迁来（Task 8）：GUI 装配侧组告警 device 字段需跨 crate
+/// 取用，agent_link 内 hello 帧构造改经 `crate::alert::hostname()`。
+pub fn hostname() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_default()
+}
+
 pub struct AlertClient {
     url: String,
     template: String,

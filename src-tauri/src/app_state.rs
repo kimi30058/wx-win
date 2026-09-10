@@ -140,6 +140,12 @@ pub struct Assembled {
     pub supervisor_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// 当前 AgentLink（connect 重建换新 / disconnect halt）
     pub link: LinkSlot,
+    /// webhook 告警客户端（SidecarDead/掉线两挂点共用）。Arc<RwLock<..>>
+    /// （LinkSlot 同 idiom）：外层 Arc 供状态机 on_change 闭包与结构体共享
+    /// 同一把锁；内层 RwLock 是热更新槽——save_settings 合并配置后重建注入，
+    /// 每次告警读当前值，用户改 webhookUrl 保存后即刻生效（Task 7 review
+    /// 硬性输入：装配时固化 cfg 快照会让告警永远发旧地址）。
+    pub alert: Arc<RwLock<Arc<wxauto_desktop::alert::AlertClient>>>,
     /// 连接管理互斥（必修 4）：start_link/stop_link 全程持锁串行化——
     /// 并发双 connect 时旧「先写者」link 从未被 halt（幽灵重连+心跳假亮）。
     /// 槽锁只保护单次读写，管理操作（halt 旧+建新+写槽）须整体原子。
@@ -184,6 +190,13 @@ for line in sys.stdin:
             listeners.clone(),
         ));
         let link: LinkSlot = Arc::new(std::sync::RwLock::new(None));
+        let alert: Arc<RwLock<Arc<wxauto_desktop::alert::AlertClient>>> = Arc::new(RwLock::new(
+            Arc::new(wxauto_desktop::alert::AlertClient::new(
+                String::new(),
+                String::new(),
+                wxauto_desktop::alert::hostname(),
+            )),
+        ));
         Ok(Arc::new(Assembled {
             config: Arc::new(RwLock::new(Config {
                 server_url: url,
@@ -196,6 +209,7 @@ for line in sys.stdin:
             supervisor,
             supervisor_task: std::sync::Mutex::new(None),
             link,
+            alert,
             link_ops: tokio::sync::Mutex::new(()),
             bridge: UiEventBridge::new(),
             // 测试装配不落盘——outbox 全 no-op（Disabled 形态）
@@ -282,6 +296,9 @@ for line in sys.stdin:
                 });
             }));
         }
+        // webhook 告警（心跳掉线/恢复挂点）：与状态机挂点同源——每次连接
+        // 从 Assembled.alert 读当前客户端（配置热更新后重连即生效）
+        link.set_alert_sink(self.alert.read().await.clone());
         *slot_write(&self.link) = Some(link.clone());
         tokio::spawn({
             let l = link.clone();
@@ -402,6 +419,20 @@ impl AppStateCtx {
                         config_path.clone(),
                     ))
                     .await;
+                // 3'. webhook 告警客户端（配置驱动；空 URL = 禁用 no-op）。
+                //     RwLock 包裹供 save_settings 热更新（见 Assembled.alert 注释）。
+                //     webhook 字段从 cfg_lock 现读（cfg 已 move 进锁——P0 共享锁改造）
+                let (webhook_url, webhook_template) = {
+                    let g = cfg_lock.read().await;
+                    (g.webhook_url.clone(), g.webhook_template.clone())
+                };
+                let alert = Arc::new(RwLock::new(Arc::new(
+                    wxauto_desktop::alert::AlertClient::new(
+                        webhook_url,
+                        webhook_template,
+                        wxauto_desktop::alert::hostname(),
+                    ),
+                )));
                 // outbox 装配（spec §4.2）：事件先落盘后发送。打开失败降级
                 // disabled（不阻断启动——发件箱故障只损失补发能力，
                 // 不损失实时上报）。路径与 config.json 同目录
@@ -413,16 +444,27 @@ impl AppStateCtx {
                     }
                 };
                 // 3. 状态机（注入 on_change：六态变化 → wxauto://state。
-                //    bridge 已在 shell 阶段 attach——首事件不丢，问题 B 消除）
+                //    bridge 已在 shell 阶段 attach——首事件不丢，问题 B 消除。
+                //    alert 捕获进闭包：SidecarDead 终态发 webhook——告警时刻
+                //    从 RwLock 读当前客户端，配置热更新即刻生效）
                 let state_machine = {
                     let bridge = bridge.clone();
+                    let alert = alert.clone();
                     Arc::new(
                         AppStateMachine::new()
                             .with_on_change(Box::new(move |_old, new| {
                                 let bridge = bridge.clone();
+                                let alert = alert.clone();
                                 let new = new.clone();
                                 tokio::spawn(async move {
                                     bridge.emit_state(&new).await;
+                                    if new == wxauto_desktop::state::AppState::SidecarDead {
+                                        let client = alert.read().await.clone();
+                                        client.send(
+                                            "sidecar 瘫痪",
+                                            "退避重启耗尽进入终态——设备需人工介入（重启 App 或检查微信环境）",
+                                        );
+                                    }
                                 });
                             }))
                             .await,
@@ -469,6 +511,7 @@ impl AppStateCtx {
                     supervisor,
                     supervisor_task: std::sync::Mutex::new(None),
                     link,
+                    alert,
                     link_ops: tokio::sync::Mutex::new(()),
                     bridge,
                     outbox,
@@ -521,6 +564,17 @@ impl AppStateCtx {
             cfg.webhook_url = patch.webhook_url;
             cfg.webhook_template = patch.webhook_template;
             config::save_config(&self.config_path, &cfg)?;
+            // webhook 热更新（Task 7 review 硬性输入）：合并后以新配置重建
+            // alert 客户端——状态机闭包与心跳挂点在告警时刻读 RwLock 当前值，
+            // 用户改 webhookUrl 保存后下一次告警即发新地址（不重建则固化
+            // 装配时快照，告警永远发旧地址）。在 cfg 写锁内重建：读 cfg 字段
+            // 与写 alert 槽同临界区，杜绝「读到半新半旧配置」的交错。
+            let new_alert = Arc::new(wxauto_desktop::alert::AlertClient::new(
+                cfg.webhook_url.clone(),
+                cfg.webhook_template.clone(),
+                wxauto_desktop::alert::hostname(),
+            ));
+            *assembled.alert.write().await = new_alert;
         }
         // 落盘成功后热重载（原配置读写锁在 start_link 的 build_url 里还要读，
         // 先释放写锁防死锁）

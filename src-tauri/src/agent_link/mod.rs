@@ -96,6 +96,9 @@ pub struct AgentLink {
     /// 指令日志桥（GUI 桥 wxauto://command-log；on_command 完成点投递）。
     /// 与 event_sink 同为运行期注入。
     command_sink: RwLock<Option<ValueSink>>,
+    /// webhook 告警客户端（GUI 注入；None = 未装配告警）。运行期注入，
+    /// 模式照抄 event_sink。
+    alert_sink: RwLock<Option<std::sync::Arc<crate::alert::AlertClient>>>,
     /// WS 连接态（on_connect 置 true / on_disconnect 置 false）。
     /// GUI 前端「服务器连接」灯数据源（Task 9）。
     ws_connected: AtomicBool,
@@ -136,6 +139,7 @@ impl AgentLink {
             pub_url: url,
             event_sink: RwLock::new(event_sink.map(Arc::from)),
             command_sink: RwLock::new(None),
+            alert_sink: RwLock::new(None),
             ws_connected: AtomicBool::new(false),
             halted: AtomicBool::new(false),
             halt_tx: tokio::sync::watch::Sender::new(false),
@@ -154,6 +158,32 @@ impl AgentLink {
     pub fn set_command_sink(&self, sink: Box<dyn Fn(Value) + Send + Sync>) {
         *write_sink(&self.command_sink).unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(Arc::from(sink));
+    }
+
+    /// 注入 webhook 告警客户端（GUI 装配段调用）。直写 + 中毒恢复
+    /// （write_sink 是 ValueSink 专用签名，此处类型不同）
+    pub fn set_alert_sink(&self, client: std::sync::Arc<crate::alert::AlertClient>) {
+        *self
+            .alert_sink
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(client);
+    }
+
+    /// 心跳 wxOnline 翻转告警（true→false 掉线 / false→true 恢复；
+    /// 变化才发天然防风暴）
+    async fn on_online_changed(&self, online: bool) {
+        if let Some(alert) = self
+            .alert_sink
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            if online {
+                alert.send("微信已恢复", "心跳探测恢复在线");
+            } else {
+                alert.send("微信掉线", "心跳探测离线（微信关闭/掉登录/窗口不可操作）");
+            }
+        }
     }
 
     /// 运行期注入渠道 ID（P2 任务 8c：GUI/CLI 装配后、run 之前调；
@@ -264,7 +294,7 @@ impl AgentLink {
             "appVersion": env!("CARGO_PKG_VERSION"),
             "wxid": info["wxid"].as_str().unwrap_or(""),
             "nickname": info["nickname"].as_str().unwrap_or(""),
-            "hostname": hostname(),
+            "hostname": crate::alert::hostname(),
             "channelId": read_or_recover(&self.channel_id).clone(),
             "ts": inbound::now_ms(),
         });
@@ -488,6 +518,8 @@ impl AgentLink {
             // wxOnline 变化 → GUI 补发 status（含 listeners/sidecarAlive 与初始口径一致）
             if last_online != Some(online) {
                 last_online = Some(online);
+                // webhook 告警挂点：翻转才发（天然防风暴）
+                self.on_online_changed(online).await;
                 let listeners = self.listeners.list().await.len();
                 self.emit_event(inbound::status_event(online, listeners, true))
                     .await;
@@ -647,9 +679,36 @@ impl TransportHandler for LinkHandler {
     }
 }
 
-/// 主机名（Windows COMPUTERNAME 优先，兼容 HOSTNAME；取不到为空）
-fn hostname() -> String {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_default()
+#[cfg(test)]
+mod alert_tests {
+    use super::*;
+    use crate::alert::AlertClient;
+    use crate::sidecar::SidecarHandle;
+    use std::sync::Arc;
+
+    /// set_alert_sink 注入后可读回（RwLock 中毒恢复路径同 event_sink）
+    #[tokio::test]
+    async fn test_alert_sink_roundtrip() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let handle = SidecarHandle::spawn_with_python("pass\n", &[])
+            .await
+            .expect("spawn 失败");
+        let session = Arc::new(WxSession::new(Arc::new(Mutex::new(handle))));
+        let listeners = Arc::new(ListenerRegistry::new(session.clone()));
+        let link = AgentLink::new(session, listeners, format!("ws://{addr}/"));
+        let client = Arc::new(AlertClient::new(String::new(), String::new(), "t".into()));
+        link.set_alert_sink(client.clone());
+        assert!(
+            link.alert_sink
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some(),
+            "注入后应可读回"
+        );
+        // 空 URL send 全链不炸（no-op）
+        link.on_online_changed(false).await;
+        link.on_online_changed(true).await;
+    }
 }

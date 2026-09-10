@@ -309,6 +309,24 @@ fn test_keyring_roundtrip_or_graceful_err() {
     }
 }
 
+/// SidecarDead 终态触发一次 on_change(new=SidecarDead)——webhook 挂点依赖的语义；
+/// 终态重复标记不重复触发（同值不回调 → 不重复告警）
+#[tokio::test]
+async fn test_sidecar_dead_fires_on_change_exactly_once() {
+    let fired = Arc::new(std::sync::Mutex::new(0));
+    let f2 = fired.clone();
+    let m = AppStateMachine::new()
+        .with_on_change(Box::new(move |_old, new: &AppState| {
+            if *new == AppState::SidecarDead {
+                *f2.lock().unwrap() += 1;
+            }
+        }))
+        .await;
+    m.mark_sidecar_died().await;
+    m.mark_sidecar_died().await; // 终态重复标记不重复告警（同值不触发）
+    assert_eq!(*fired.lock().unwrap(), 1);
+}
+
 // ── sidecar 退出探测 + 句柄热替换（Task 6 关键集成点） ─────────
 
 #[tokio::test]
