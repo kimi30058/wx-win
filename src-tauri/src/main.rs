@@ -120,6 +120,8 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
     // 4. AgentLink（WS 主循环 + 通知/心跳/好友轮询三泵，run 内部自 spawn）
     let link = Arc::new(AgentLink::new(session.clone(), listeners.clone(), url));
+    // P2 任务 8c：hello 帧带 channelId（排障用；身份判定仍在 token JWT）
+    link.set_channel_id(cfg.channel_id.clone());
     tokio::spawn({
         let l = link.clone();
         async move { l.run().await }

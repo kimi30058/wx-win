@@ -216,6 +216,8 @@ async fn test_e2e_hello_result_and_media_events() {
     });
 
     let link = make_link(format!("ws://{addr}/?token=t")).await;
+    // P2 任务 8c：hello 帧带 channelId（排障时服务端日志可直接核对渠道身份）
+    link.set_channel_id("ch-e2e-001".into());
     let runner = tokio::spawn({
         let l = link.clone();
         async move { l.run().await }
@@ -266,6 +268,7 @@ async fn test_e2e_hello_result_and_media_events() {
     assert_eq!(h["wxid"], "wxid_test");
     assert_eq!(h["nickname"], "测试号");
     assert!(h.get("hostname").is_some(), "hello 应含 hostname 字段");
+    assert_eq!(h["channelId"], "ch-e2e-001", "P2 8c：hello 应带 channelId");
     assert!(h["ts"].as_u64().expect("ts 应为数字") > 0);
 
     // result 帧：requestId 回填、success、data 透传

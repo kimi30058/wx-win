@@ -104,6 +104,10 @@ pub struct AgentLink {
     /// 停机信号通道：halt 发信号；transport/泵 select 感知（消除 backoff
     /// 睡眠窗口的停机延迟——30s 退避期间 halt 不该等到睡醒才退出）。
     halt_tx: tokio::sync::watch::Sender<bool>,
+    /// 渠道 ID（P2 任务 8c：Config.channelId 透进 hello 帧——连接身份由
+    /// token JWT 决定，此字段纯排障用途，服务端 hello schema 非严格
+    /// zod，多余字段向后兼容）。run 之前注入；空串时 hello 带空值。
+    channel_id: RwLock<String>,
 }
 
 impl AgentLink {
@@ -130,6 +134,7 @@ impl AgentLink {
             ws_connected: AtomicBool::new(false),
             halted: AtomicBool::new(false),
             halt_tx: tokio::sync::watch::Sender::new(false),
+            channel_id: RwLock::new(String::new()),
         }
     }
 
@@ -143,6 +148,15 @@ impl AgentLink {
     pub fn set_command_sink(&self, sink: Box<dyn Fn(Value) + Send + Sync>) {
         *write_sink(&self.command_sink).unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(Arc::from(sink));
+    }
+
+    /// 运行期注入渠道 ID（P2 任务 8c：GUI/CLI 装配后、run 之前调；
+    /// on_connect 每次（含重连）组 hello 帧读取）
+    pub fn set_channel_id(&self, channel_id: String) {
+        *self
+            .channel_id
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = channel_id;
     }
 
     /// WS 连接态快照（GUI「服务器连接」灯）
@@ -229,6 +243,7 @@ impl AgentLink {
             "wxid": info["wxid"].as_str().unwrap_or(""),
             "nickname": info["nickname"].as_str().unwrap_or(""),
             "hostname": hostname(),
+            "channelId": read_or_recover(&self.channel_id).clone(),
             "ts": inbound::now_ms(),
         });
         // hello 本身不走 send_frame 门（直接发，防自锁）

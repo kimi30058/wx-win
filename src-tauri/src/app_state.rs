@@ -243,6 +243,8 @@ for line in sys.stdin:
             url,
             None,
         ));
+        // P2 任务 8c：hello 帧带 channelId（配置快照注入；重连复用同值）
+        link.set_channel_id(self.config.read().await.channel_id.clone());
         // 双 sink：event 帧（status 组装 wsConnected）+ 指令日志
         {
             let bridge = self.bridge.clone();
