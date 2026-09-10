@@ -23,11 +23,13 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 import Settings from './Settings.vue';
 
-/** 模拟 get_config 回包（token 不回显属正常契约） */
+/** 模拟 get_config 回包（token 不回显属正常契约；webhookUrl/webhookTemplate 为 Task 9 新增） */
 const FAKE_CONFIG = {
   serverUrl: 'ws://127.0.0.1:60021',
   channelId: 'ch-001',
   autoConnect: false,
+  webhookUrl: 'https://open.feishu.cn/hook/demo',
+  webhookTemplate: '',
 };
 
 function mountSettings() {
@@ -95,5 +97,25 @@ describe('Settings 表单校验与保存', () => {
 
     const saveCall = invokeMock.mock.calls.find((c) => c[0] === 'save_config');
     expect(saveCall).toBeUndefined();
+  });
+
+  it('webhook 字段回填与提交——URL 必须随保存透传', async () => {
+    const wrapper = mountSettings();
+    const { useAppStore } = await import('../stores/app');
+    useAppStore().config = { ...FAKE_CONFIG };
+    await flushPromises();
+    const inputs = wrapper.findAll('input');
+    const urlInput = inputs.find((i) =>
+      (i.element as HTMLInputElement).value.includes('feishu'),
+    );
+    expect(urlInput).toBeTruthy();
+    // 提交：填 token 触发完整保存链
+    wrapper.find('form').trigger('submit');
+    await flushPromises();
+    const call = invokeMock.mock.calls.find((c) => c[0] === 'save_config');
+    expect(call).toBeTruthy();
+    const payload = (call?.[1] as { config: Record<string, unknown> }).config;
+    expect(payload.webhookUrl).toBe(FAKE_CONFIG.webhookUrl);
+    expect(payload.webhookTemplate).toBe('');
   });
 });

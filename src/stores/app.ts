@@ -128,11 +128,14 @@ function parseAppLogItem(v: unknown): AppLogItem {
   };
 }
 
-/** 设备配置（get_config 返回的业务字段子集；token 只写不读——keyring 侧不回传） */
+/** 设备配置（get_config 返回的业务字段子集；token 只写不读——keyring 侧不回传。
+ * webhookUrl/webhookTemplate：webhook 告警目标与消息模板，均可选（空=禁用） */
 export interface AppConfig {
   serverUrl: string;
   channelId: string;
   autoConnect: boolean;
+  webhookUrl: string;
+  webhookTemplate: string;
 }
 
 /** saveConfig 入参：token 非空时随配置提交（Rust 侧写 keyring） */
@@ -204,13 +207,15 @@ function parseCommandLogItem(v: unknown): CommandLogItem {
   };
 }
 
-/** get_config 载荷守卫：只取面板用得到的三个字段 */
+/** get_config 载荷守卫：只取面板用得到的字段（webhook 字段旧端缺省落空串） */
 function parseAppConfig(v: unknown): AppConfig {
   const r = isRecord(v) ? v : {};
   return {
     serverUrl: str(r.serverUrl),
     channelId: str(r.channelId),
     autoConnect: r.autoConnect === true,
+    webhookUrl: str(r.webhookUrl),
+    webhookTemplate: str(r.webhookTemplate),
   };
 }
 

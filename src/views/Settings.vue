@@ -22,6 +22,20 @@
         <t-switch v-model="form.autoConnect" />
         <span class="hint">启动即自动连接服务器</span>
       </t-form-item>
+      <t-form-item label="告警 Webhook" name="webhookUrl">
+        <t-input
+          v-model="form.webhookUrl"
+          placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxx（留空禁用）"
+        />
+        <span class="hint">sidecar 瘫痪 / 微信掉线时通知</span>
+      </t-form-item>
+      <t-form-item label="告警模板" name="webhookTemplate">
+        <t-textarea
+          v-model="form.webhookTemplate"
+          placeholder='留空用通用 JSON；支持 {title} {detail} {ts} {device} 占位符'
+          :autosize="{ minRows: 3, maxRows: 8 }"
+        />
+      </t-form-item>
       <t-form-item>
         <t-space>
           <t-button type="submit" theme="primary" :loading="saving">保存</t-button>
@@ -34,8 +48,10 @@
 
 <script setup lang="ts">
 /**
- * 设置视图：serverUrl/channelId/token/autoConnect 表单（spec §3.4）。
+ * 设置视图：serverUrl/channelId/token/autoConnect + webhook 告警两字段表单（spec §3.4）。
  * 保存调 store.saveConfig（Rust 侧落 config.json；token 非空时写 keyring）。
+ * webhookUrl/webhookTemplate 均可选（留空=禁用），但保存时必须始终透传——
+ * 后端 save_config 无条件合并，缺字段即清空已存值。
  * 表单在 config 加载完成后才渲染（formReady），避免空值闪染。
  */
 import { computed, reactive, ref, watch } from 'vue';
@@ -52,6 +68,8 @@ const form = reactive({
   channelId: '',
   token: '',
   autoConnect: false,
+  webhookUrl: '',
+  webhookTemplate: '',
 });
 
 // config 到达后回填一次（init 异步；watch 保证任何时序下都能填上）
@@ -62,6 +80,8 @@ watch(
       form.serverUrl = cfg.serverUrl;
       form.channelId = cfg.channelId;
       form.autoConnect = cfg.autoConnect;
+      form.webhookUrl = cfg.webhookUrl;
+      form.webhookTemplate = cfg.webhookTemplate;
     }
   },
   { immediate: true },
@@ -78,6 +98,10 @@ async function onSave({ validateResult }: { validateResult: unknown }) {
       serverUrl: form.serverUrl.trim(),
       channelId: form.channelId.trim(),
       autoConnect: form.autoConnect,
+      // webhook 两字段必须始终随载荷提交（后端 save_config 是无条件合并语义，
+      // 载荷缺字段 = 保存即静默清空已存 webhook 配置——与 token 的"留空跳过"不同）
+      webhookUrl: form.webhookUrl.trim(),
+      webhookTemplate: form.webhookTemplate,
       // 留空不提交 token 字段——保留 keyring 已存值（Rust 侧空串跳过写入）
       ...(form.token.trim() !== '' ? { token: form.token.trim() } : {}),
     });
