@@ -17,8 +17,11 @@ import sidecar 会加载第二份模块实例，回写落空，真实模式下�
 （msg_id/chat_who/chat_type/attr/msg_type/sender/content），与 Rust 侧
 spec.rs RawMessage 严格对齐；camelCase 的 WS 帧转换在 Rust agent_link 层做。
 """
+import hashlib
 import os
+import threading
 import time
+from collections import OrderedDict
 
 import sidecar_log  # noqa: E402 — 同目录；日志走 stderr（stdout 铁律专用 JSON-RPC）
 
@@ -177,6 +180,48 @@ def _take_msg(params, msg_pool, msg_pool_ts):
     if isinstance(entry, tuple):
         return entry
     return (entry, "")  # 旧形态裸 msg：无 chat_who 信息
+
+
+# ── 滑动窗去重（UIA 重复回调吞除，2026-09-10 P1）─────────────────
+# wxautox4 的 MESSAGE_HASH 挡库内重复采集；本层挡回调层重复（通知通道
+# Lagged 重订阅、监听重注册等场景）。窗口 5s、容量 1024，命中即整条
+# 丢弃（不 _pool_put、不 notify——二次 RPC 也不会重复触发）。
+
+_DEDUP_WINDOW_MS = 5000      # 指纹保留时长（毫秒）
+_DEDUP_CAPACITY = 1024       # 窗口容量上限（防长期运行内存膨胀）
+_DEDUP_LOCK = threading.RLock()
+# OrderedDict[指纹 hex] = 记录时刻（time.monotonic 秒）——有序供容量淘汰
+_DEDUP_WINDOW: "OrderedDict[str, float]" = OrderedDict()
+
+
+def _dedup_key(msg, chat_who):
+    """内容指纹：会话+发送人+内容+类型 四元组 md5"""
+    raw = f"{chat_who}|{getattr(msg, 'sender', '')}|{getattr(msg, 'content', '')}|{getattr(msg, 'type', '')}"
+    return hashlib.md5(raw.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _seen_recently(key, now=None):
+    """窗口内命中返 True 并刷新时刻；未命中记录返 False。
+
+    now 参数注入（测试控时用）；默认 time.monotonic()。容量超限淘汰最旧
+    （OrderedDict 首项）——被淘汰指纹可重新通过（保守方向：宁可放行勿误吞）。
+    """
+    ts = time.monotonic() if now is None else now
+    with _DEDUP_LOCK:
+        # 先淘汰过期项（从最旧侧弹出，遇到首个未过期即停）
+        while _DEDUP_WINDOW:
+            oldest_k, oldest_ts = next(iter(_DEDUP_WINDOW.items()))
+            if ts - oldest_ts > _DEDUP_WINDOW_MS / 1000.0:
+                _DEDUP_WINDOW.popitem(last=False)
+            else:
+                break
+        if key in _DEDUP_WINDOW:
+            _DEDUP_WINDOW[key] = ts  # 刷新时刻
+            return True
+        _DEDUP_WINDOW[key] = ts
+        if len(_DEDUP_WINDOW) > _DEDUP_CAPACITY:
+            _DEDUP_WINDOW.popitem(last=False)
+        return False
 
 
 def _pool_put(msg_pool, msg_pool_ts, mid, msg, chat_who):
@@ -516,6 +561,8 @@ def _listen_add(params, wx, msg_pool, msg_pool_ts, notify, mock):
         消息归属会话（msg 对象本身无 who 属性，附录 A）。
         """
         try:
+            if _seen_recently(_dedup_key(msg, str(getattr(chat, "who", "")))):
+                return  # 窗口内重复回调：整条丢弃（不入池不通知）
             # 原生 id 优先（确定性幂等键——Server 可按 msg_id 去重；
             # 同一消息重复回调命中同一池键，二次 RPC 不重复触发）。
             # 旧版 wxautox4 msg 无 id 属性 → 退回随机 uuid（不劣于现状）。

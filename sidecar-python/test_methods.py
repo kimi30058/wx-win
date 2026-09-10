@@ -31,6 +31,20 @@ def _fast_sleep(monkeypatch):
     monkeypatch.setattr(time, "sleep", lambda s: None)
 
 
+@pytest.fixture(autouse=True)
+def _clear_dedup_window():
+    """滑动窗去重状态测试隔离（模块级窗口每个测试清空）。
+
+    getattr 防御：实现合入前 _DEDUP_WINDOW 尚不存在——fixture 不因此
+    炸全文件（TDD 红阶段只红目标测试）。
+    """
+    import methods
+    w = getattr(methods, "_DEDUP_WINDOW", None)
+    if w is not None:
+        w.clear()
+    yield
+
+
 class FakeMsg:
     """伪造 wxautox4 Message 对象（附录 A：属性 type/attr/sender/content/id/is_at）"""
 
@@ -679,6 +693,79 @@ def test_listen_callback_msg_id_falls_back_to_uuid(fakewx):
     fakewx.listen_reg["客户群"](msg, FakeChat("客户群"))
     mid = notifications[0][1]["msg_id"]
     assert len(mid) == 12 and all(c in "0123456789abcdef" for c in mid)
+
+
+# ══════════ 滑动窗去重（UIA 重复回调吞除）══════════
+
+
+def test_dedup_same_fingerprint_within_window_swallowed(fakewx):
+    """同指纹（会话+发送人+内容+类型）5s 内第二次回调被吞——notify 不再触发"""
+    notifications = []
+    msg_pool, msg_pool_ts = {}, {}
+    _dispatch("listen.add", {"nickname": "客户群"}, fakewx,
+              notify=lambda m, p: notifications.append((m, p)),
+              msg_pool=msg_pool, msg_pool_ts=msg_pool_ts)
+    msg = FakeMsg(content="重复消息")
+    msg.id = "n1"
+    chat = FakeChat("客户群", chat_type="group")
+    fakewx.listen_reg["客户群"](msg, chat)
+    fakewx.listen_reg["客户群"](msg, chat)  # 5s 内重复回调
+    assert len(notifications) == 1, "同指纹窗口内重复应被吞"
+
+
+def test_dedup_window_expiry_lets_same_fingerprint_pass(fakewx):
+    """窗口过期后同指纹放行（把窗内时刻拨回 6s 前绕开真实等待）"""
+    import methods
+    notifications = []
+    msg_pool, msg_pool_ts = {}, {}
+    _dispatch("listen.add", {"nickname": "客户群"}, fakewx,
+              notify=lambda m, p: notifications.append((m, p)),
+              msg_pool=msg_pool, msg_pool_ts=msg_pool_ts)
+    msg = FakeMsg(content="过期后放行")
+    chat = FakeChat("客户群", chat_type="group")
+    fakewx.listen_reg["客户群"](msg, chat)
+    assert len(notifications) == 1
+    # 把窗内唯一指纹的时刻拨回 6s 前（time.monotonic 时钟域）
+    with methods._DEDUP_LOCK:
+        k = next(iter(methods._DEDUP_WINDOW))
+        methods._DEDUP_WINDOW[k] = time.monotonic() - 6.0
+    fakewx.listen_reg["客户群"](msg, chat)
+    assert len(notifications) == 2, "窗口过期后同指纹应放行"
+
+
+def test_dedup_different_fingerprint_independent(fakewx):
+    """不同指纹互不影响（会话/发送人/内容/类型任一不同即独立）"""
+    notifications = []
+    msg_pool, msg_pool_ts = {}, {}
+    _dispatch("listen.add", {"nickname": "客户群"}, fakewx,
+              notify=lambda m, p: notifications.append((m, p)),
+              msg_pool=msg_pool, msg_pool_ts=msg_pool_ts)
+    m1 = FakeMsg(content="A")
+    m2 = FakeMsg(content="B")
+    chat = FakeChat("客户群", chat_type="group")
+    fakewx.listen_reg["客户群"](m1, chat)
+    fakewx.listen_reg["客户群"](m2, chat)
+    assert len(notifications) == 2
+
+
+def test_dedup_capacity_evicts_oldest(fakewx):
+    """容量上限淘汰最旧——被淘汰的老指纹可重新放行"""
+    notifications = []
+    msg_pool, msg_pool_ts = {}, {}
+    _dispatch("listen.add", {"nickname": "客户群"}, fakewx,
+              notify=lambda m, p: notifications.append((m, p)),
+              msg_pool=msg_pool, msg_pool_ts=msg_pool_ts)
+    chat = FakeChat("客户群", chat_type="group")
+    # 灌满窗（容量 1024）：灌 1024 个不同指纹
+    for i in range(1024):
+        fakewx.listen_reg["客户群"](FakeMsg(content=f"c{i}"), chat)
+    assert len(notifications) == 1024
+    # 第 1025 个不同指纹照常放行（最旧被淘汰，不误吞新指纹）
+    fakewx.listen_reg["客户群"](FakeMsg(content="c_new"), chat)
+    assert len(notifications) == 1025
+    # 最早的老指纹 c0 已被淘汰出窗 → 重新放行
+    fakewx.listen_reg["客户群"](FakeMsg(content="c0"), chat)
+    assert len(notifications) == 1026
 
 
 def test_listen_callback_passes_is_at_true(fakewx):
