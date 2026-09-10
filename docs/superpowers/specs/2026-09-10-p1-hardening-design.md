@@ -94,8 +94,11 @@ mid = str(getattr(msg, "id", "")).strip() or uuid.uuid4().hex[:12]
 - `send(title, detail)`：内部 `tokio::spawn` + 5s 超时；失败/超时仅
   `tracing::warn!`，无重试队列（YAGNI，告警丢失可接受，风暴不可接受）。
 - `webhook_url` 空串 = 禁用（默认），send 直接 no-op。
-- 依赖 `reqwest = { version = "0.13", features = ["json"] }`——Cargo.lock
-  已有（tauri 传递依赖），零新增编译单元。
+- 依赖 `reqwest = { version = "0.13", default-features = false, features =
+  ["json", "rustls-tls"] }`——Cargo.lock 已有 reqwest 0.13.4（tauri 传递依赖）
+  但**未激活 TLS 后端**（锁文件 reqwest 依赖表无 rustls/native-tls，webhook
+  目标全是 https），启用 rustls-tls 会引入 rustls 编译单元族——接受该成本
+  （纯 Rust TLS，无系统 OpenSSL 依赖，Windows 打包友好）。
 - lib.rs core 不依赖 tauri 的约束不破坏（alert.rs 只需 reqwest + tokio）。
 
 ### 模板机制（借鉴 SiverWXbot 两处巧思）
