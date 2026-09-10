@@ -32,7 +32,7 @@ def _fast_sleep(monkeypatch):
 
 
 class FakeMsg:
-    """伪造 wxautox4 Message 对象（附录 A：属性仅 type/attr/sender/content/id）"""
+    """伪造 wxautox4 Message 对象（附录 A：属性 type/attr/sender/content/id/is_at）"""
 
     def __init__(self, content="hello", mtype="text", attr="friend", sender="张三"):
         self.content = content
@@ -44,6 +44,7 @@ class FakeMsg:
         self.text = "语音转写文本"
         self.quoted = None
         self.forwarded = None
+        self.is_at = False
 
     def download(self):
         return self.downloaded
@@ -649,6 +650,38 @@ def test_listen_callback_fires_notification_with_msg_id(fakewx):
     assert params["sender"] == "张三"
     assert params["msg_id"]  # 非空 msg_id
     assert msg_pool[params["msg_id"]][0] is msg  # 对象入池（(msg, chat_who) 元组形态）
+    assert params["is_at"] is False  # FakeMsg 默认 is_at=False 透传
+
+
+def test_listen_callback_passes_is_at_true(fakewx):
+    """群内 @机器人消息：msg.is_at=True 透传到通知帧（硬编码 false 的矫正）"""
+    notifications = []
+    msg_pool, msg_pool_ts = {}, {}
+    _dispatch("listen.add", {"nickname": "客户群"}, fakewx,
+              notify=lambda m, p: notifications.append((m, p)),
+              msg_pool=msg_pool, msg_pool_ts=msg_pool_ts)
+    msg = FakeMsg(content="@机器人 你好")
+    msg.is_at = True
+    chat = FakeChat("客户群", chat_type="group")
+    fakewx.listen_reg["客户群"](msg, chat)
+    assert notifications[0][1]["is_at"] is True
+
+
+def test_raw_message_is_at_missing_attr_defaults_false():
+    """旧版 wxautox4 无 is_at 属性：getattr 默认值安全降级 False（不炸回调）"""
+    class OldMsg:
+        content = "hi"
+        type = "text"
+        attr = "friend"
+        sender = "张三"
+
+    class OldChat:
+        who = "张三"
+        chat_type = "friend"
+
+    import methods
+    r = methods._raw_message(OldMsg(), OldChat(), "m1")
+    assert r["is_at"] is False
 
 
 def test_listen_callback_exception_does_not_propagate(fakewx):

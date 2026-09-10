@@ -195,6 +195,7 @@ def _raw_message(msg, chat, mid=""):
         "msg_type": str(getattr(msg, "type", "text")),
         "sender": str(getattr(msg, "sender", "")),
         "content": str(getattr(msg, "content", "")),
+        "is_at": bool(getattr(msg, "is_at", False)),
     }
 
 
