@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 # ── stdio 三流全部强制 UTF-8（2026-09-09 真机乱码事故：stdin 是第三个漏网流）──
 # stdout：Rust 读循环按 UTF-8 消费 JSON-RPC 帧，Windows 默认代码页（GBK 等）
@@ -131,6 +132,84 @@ _msg_pool_ts = {}
 _io_lock = threading.Lock()
 
 
+# ── 卡死自 watchdog（P2，2026-09-10 指令超时事故的自愈半边）──────────────
+# 事故形态：msg.send 的 UIA 调用挂起占死本进程的单线程 dispatch 循环 →
+# 后续所有 RPC（含 wx.is_online 心跳）排队 → Rust 侧 60s 指令超时连环炸、
+# wxOnline 假翻转。进程内无人能打断主线程——但守护线程可以 os._exit：
+# Rust reaper 收尸（exit code 81 留痕）→ Supervisor 既有退避重启路径拉起
+# 新 sidecar 重跑 wx.init（state.rs run 循环，Rust 侧零改动）。
+#
+# 阈值取舍：> RPC_TIMEOUT(30s) 且 > 正常慢操作上限（wx.init ~15s 冷启动、
+# listen.add 三重校验重试可达数十秒）——120s 只裁「永不返回」的真挂死。
+_dispatch_since = None  # None=空闲；否则当前 dispatch 开始时刻（time.time()）
+
+
+def _mark_dispatch_enter():
+    """main 循环进入 dispatch 前打点（watchdog 据此判「在途」）"""
+    global _dispatch_since
+    _dispatch_since = time.time()
+
+
+def _mark_dispatch_exit():
+    """dispatch 结束（含异常路径，try/finally 调用）清在途标记"""
+    global _dispatch_since
+    _dispatch_since = None
+
+
+def _stuck_threshold_from_env(env=None):
+    """WXAUTO_STUCK_TIMEOUT 解析：缺省 120s；非法回退默认；下限 30s
+    （误配 1s 会把正常 wx.init ~15s 杀成重启风暴）。纯函数可单测。"""
+    raw = (os.environ if env is None else env).get("WXAUTO_STUCK_TIMEOUT")
+    try:
+        v = float(raw) if raw else 120.0
+    except (TypeError, ValueError):
+        sidecar_log.log("WARN", f"WXAUTO_STUCK_TIMEOUT 非法({raw!r})，回退默认 120s")
+        v = 120.0
+    return max(v, 30.0)
+
+
+def _watchdog_should_exit(started, now, threshold):
+    """卡死裁定（纯函数可单测）：在途超过阈值才裁；空闲（None）永不退出。"""
+    return started is not None and now - started > threshold
+
+
+def _run_watchdog(threshold=None, check_interval=10.0, sleep=None, now=None):
+    """watchdog 主循环（守护线程跑；sleep/now 可注入供测试）。
+
+    裁定卡死后：stderr 留 ERROR 痕（GUI 运行日志可见）→ os._exit(81)。
+    不走 _notify（stdout 帧）：_io_lock 若恰被卡住的主线程持有会连坐
+    watchdog；stderr 独立流无锁，Rust stderr 读循环恒在消费。
+    残余风险（接受）：UIA 的 C 扩展若不释放 GIL，本线程同样无法调度——
+    那是全进程冻结，只能靠服务端 90s 心跳超时断 WS 兜底。
+    """
+    _sleep = sleep or time.sleep
+    _now = now or time.time
+    _threshold = _stuck_threshold_from_env() if threshold is None else threshold
+    while True:
+        _sleep(check_interval)
+        started = _dispatch_since
+        if not _watchdog_should_exit(started, _now(), _threshold):
+            continue
+        dur = _now() - started
+        sidecar_log.log(
+            "ERROR",
+            f"dispatch 在途 {dur:.0f}s 超过阈值 {_threshold:.0f}s，判定 UIA 卡死，"
+            f"watchdog 自杀(退出码81)触发 Supervisor 重启",
+        )
+        os._exit(81)
+        return  # 测试桩 _exit 返回后的防自旋（生产不可达：_exit 不返回）
+
+
+def _start_watchdog(check_interval=10.0):
+    """main() 启动守护 watchdog 线程（daemon：主进程退出不阻收尸）"""
+    threading.Thread(
+        target=_run_watchdog,
+        kwargs={"check_interval": check_interval},
+        name="wxauto-watchdog",
+        daemon=True,
+    ).start()
+
+
 def _prune_msg_pool():
     """清理 60s 过期的 msg 对象（迭代走快照——监听线程会并发插入，审查 I1）"""
     import time
@@ -208,6 +287,8 @@ def main():
             pythoncom.CoInitialize()
         except ImportError:
             pass  # 非 Windows 开发态兜底（真实部署必有）
+    # 卡死自 watchdog：dispatch 在途超阈值（默认 120s）自杀重启（P2）
+    _start_watchdog()
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -219,6 +300,7 @@ def main():
         if "id" not in req or not isinstance(req.get("id"), (int, str)):
             continue  # sidecar 不接收通知；只有服务器→设备方向
         try:
+            _mark_dispatch_enter()
             result = dispatch(req.get("method", ""), req.get("params", {}))
             _result(req["id"], result)
         except methods.SidecarError as e:
@@ -233,6 +315,8 @@ def main():
         except Exception as e:  # noqa: BLE001 — sidecar 边界统一转 error 帧
             sidecar_log.log("ERROR", f"dispatch {req.get('method', '?')} 失败: {type(e).__name__}: {e}")
             _error(req["id"], -32603, f"{type(e).__name__}: {e}")
+        finally:
+            _mark_dispatch_exit()
 
 
 if __name__ == "__main__":
