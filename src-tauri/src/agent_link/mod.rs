@@ -19,6 +19,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
+use crate::outbox::Outbox;
 use crate::transport::ws::{WsSender, WsTransport};
 use crate::transport::{DeviceTransport, TransportHandler};
 use crate::wx::listener::ListenerRegistry;
@@ -108,6 +109,10 @@ pub struct AgentLink {
     /// token JWT 决定，此字段纯排障用途，服务端 hello schema 非严格
     /// zod，多余字段向后兼容）。run 之前注入；空串时 hello 带空值。
     channel_id: RwLock<String>,
+    /// 上行事件发件箱（spec §4.2）：emit_event 先落盘后发送、ack 清除、
+    /// 重连补发。默认 disabled（测试/未装配）；GUI/CLI 装配层显式注入。
+    /// std RwLock（对齐 event_sink 模式——写锁临界区无 await 点）。
+    outbox: RwLock<Arc<Outbox>>,
 }
 
 impl AgentLink {
@@ -135,6 +140,7 @@ impl AgentLink {
             halted: AtomicBool::new(false),
             halt_tx: tokio::sync::watch::Sender::new(false),
             channel_id: RwLock::new(String::new()),
+            outbox: RwLock::new(Arc::new(Outbox::disabled())),
         }
     }
 
@@ -157,6 +163,22 @@ impl AgentLink {
             .channel_id
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = channel_id;
+    }
+
+    /// 运行期注入 outbox（GUI/CLI 装配层；对齐 event_sink 注入模式）
+    pub fn set_outbox(&self, outbox: Arc<Outbox>) {
+        *self
+            .outbox
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = outbox;
+    }
+
+    /// 当前 outbox 快照（读侧统一入口；锁中毒恢复对齐既有模式）
+    fn current_outbox(&self) -> Arc<Outbox> {
+        self.outbox
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// WS 连接态快照（GUI「服务器连接」灯）
@@ -266,6 +288,16 @@ impl AgentLink {
             self.send_frame(f).await;
         }
 
+        // outbox 补发（spec §4.3：置于 resync 前——resync 每监听对象 0.5~1s 拟人
+        // 间隙，别让积压事件排队其后）
+        let pending = self.current_outbox().pending();
+        if !pending.is_empty() {
+            tracing::info!(count = pending.len(), "补发 outbox 积压事件");
+            for f in pending {
+                self.send_frame(f).await;
+            }
+        }
+
         // 监听名单重放（sidecar 或服务端重启后都需要）
         let failed = self.listeners.resync().await;
         if !failed.is_empty() {
@@ -322,6 +354,18 @@ impl AgentLink {
         }
         if let Some(sink) = read_or_recover(&self.command_sink).as_ref() {
             sink(log);
+        }
+    }
+
+    /// 下行 ack 处理：按 eventId 清除 outbox（spec §3.2）
+    async fn on_ack(&self, frame: &Value) {
+        let event_id = frame["eventId"].as_str().unwrap_or_default();
+        if event_id.is_empty() {
+            tracing::warn!(?frame, "ack 帧缺 eventId，丢弃");
+            return;
+        }
+        if self.current_outbox().ack(event_id) {
+            tracing::debug!(%event_id, "事件已确认，出箱");
         }
     }
 
@@ -508,11 +552,14 @@ impl AgentLink {
         }
     }
 
-    /// 发一帧上行事件：WS + event_sink（若有）
+    /// 发一帧上行事件：event_sink → outbox 落盘 → WS 发送（先落盘后发送，spec §4.3）
     async fn emit_event(&self, frame: Value) {
         if let Some(sink) = read_or_recover(&self.event_sink).as_ref() {
             sink(frame.clone());
         }
+        // 先落盘后发送：发送失败/断线时条目已在箱，重连补发兜底；
+        // status 等非入箱帧（type 不在 {message, friend_request}）自然 no-op
+        self.current_outbox().enqueue(&frame);
         self.send_frame(frame).await;
     }
 
@@ -562,11 +609,21 @@ impl TransportHandler for LinkHandler {
         });
     }
     fn on_frame(&self, frame: Value) {
-        if frame["kind"] == "command" {
-            let link = self.link.clone();
-            tokio::spawn(async move {
-                link.on_command(&frame).await;
-            });
+        match frame["kind"].as_str() {
+            Some("command") => {
+                let link = self.link.clone();
+                tokio::spawn(async move {
+                    link.on_command(&frame).await;
+                });
+            }
+            // ack 清箱（spec §3.2）：服务端确认收到的事件出箱
+            Some("ack") => {
+                let link = self.link.clone();
+                tokio::spawn(async move {
+                    link.on_ack(&frame).await;
+                });
+            }
+            _ => {}
         }
     }
     fn on_disconnect(&self, reason: String) {
