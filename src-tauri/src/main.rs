@@ -110,7 +110,20 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         cfg.delay_min_ms,
         cfg.delay_max_ms,
     ));
-    let listeners = Arc::new(ListenerRegistry::new(session.clone()));
+    // 种子来自磁盘配置（重启恢复）+ persist hook 落盘回 config.json（spec §4.1）。
+    // 裁定：cfg 值克隆继续用于 URL 组装（维持现状），cfg_lock 仅供 hook——
+    // 两者同一初始值；hook 只写 listen_names 且写前经锁内最新值，无字段冲突。
+    let cfg_lock = Arc::new(tokio::sync::RwLock::new(cfg.clone()));
+    let listeners = Arc::new(ListenerRegistry::new_seeded(
+        session.clone(),
+        cfg_lock.read().await.listen_names.clone(),
+    ));
+    listeners
+        .set_persist_hook(wxauto_desktop::wx::listener::file_persist_hook(
+            cfg_lock,
+            default_config_path(),
+        ))
+        .await;
     // 3. 状态机 + Supervisor（sidecar 崩溃退避重启 + init 序列 + 状态推进）
     let state = Arc::new(AppStateMachine::new());
     let supervisor = Arc::new(Supervisor::new(state, session.clone(), listeners.clone()));
