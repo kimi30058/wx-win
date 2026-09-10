@@ -368,6 +368,55 @@ def test_msg_send_uses_keyword_args(fakewx):
     assert fakewx.sent == [("msg", "你好", "张三")]
 
 
+def test_msg_send_prefers_subwindow_direct_send(fakewx):
+    """P0 子窗口直发（2026-09-10 指令超时事故）：目标已有监听子窗口时
+    走 chat.SendMsg（对齐原生 wx_send_ai 主路径），不碰主窗口导航。
+
+    主窗口导航（wx.SendMsg(who=) 的搜索→切换→发送）在监听引擎运行时
+    是已知挂起点——原生项目 AI 回复一律用回调携带的子窗口对象直发。
+    """
+    chat = FakeChat("张三")
+    fakewx.sub_windows.append(chat)
+    r = _dispatch("msg.send", {"who": "张三", "text": "你好"}, fakewx)
+    assert r["ok"] is True
+    assert r["via"] == "chat"
+    assert chat.sent == [("你好", None)]   # 子窗口直发
+    assert fakewx.sent == []               # 全局 SendMsg 未走
+    assert fakewx.opened == []             # 未做主窗口导航（ChatWith）
+
+
+def test_msg_send_subwindow_send_fail_falls_back_to_main(fakewx):
+    """子窗口直发失败形态（bool False / dict status=failed）→ 降级主窗口
+    路径重发（对齐原生 quote 失败降级语义：降级必须真的发出去）。"""
+    chat = FakeChat("张三")
+    chat.SendMsg = lambda msg=None, at=None: {"status": "failed", "message": "子窗口发送失败"}
+    fakewx.sub_windows.append(chat)
+    r = _dispatch("msg.send", {"who": "张三", "text": "你好"}, fakewx)
+    assert r["ok"] is True
+    assert r["via"] == "main" and r.get("degraded")
+    assert fakewx.sent == [("msg", "你好", "张三")]  # 降级后全局发送
+
+
+def test_msg_send_no_subwindow_navigates_main_window(fakewx):
+    """无子窗口（主动下发/定时场景）→ 主窗口路径：SwitchToChat 切回消息页
+    → ChatWith 定位 → wx.SendMsg（原生 Pass_New_Friends 同款三步）。"""
+    r = _dispatch("msg.send", {"who": "张三", "text": "你好"}, fakewx)
+    assert r["ok"] is True
+    assert r["via"] == "main"
+    assert fakewx.switched >= 1          # 先切回消息页
+    assert fakewx.opened == ["张三"]      # 再定位目标会话
+    assert fakewx.sent == [("msg", "你好", "张三")]
+
+
+def test_msg_send_main_window_chatwith_timeout_wrapped(fakewx):
+    """主窗口路径 ChatWith UIA 超时 → 带排查指引的业务错误（-32000），
+    而非裸穿 -32603 LookupError——真机日志可直接裁决主窗口不可操作。"""
+    import methods
+    fakewx.ChatWith = lambda who=None: (_ for _ in ()).throw(LookupError("Find Control Timeout"))
+    with pytest.raises(methods.SidecarError, match="主窗口不可操作"):
+        _dispatch("msg.send", {"who": "张三", "text": "你好"}, fakewx)
+
+
 def test_file_send_single_filepath(fakewx):
     _dispatch("file.send", {"who": "张三", "filepath": "C:/a.png"}, fakewx)
     assert fakewx.sent == [("file", "张三", "C:/a.png")]
@@ -383,12 +432,18 @@ def test_msg_send_at_routes_to_subwindow(fakewx):
 
 
 def test_msg_send_at_uses_chat_sendmsg(monkeypatch):
-    """@ 消息走 chat.SendMsg(msg=..., at=...)——参考项目 3353 行"""
+    """@ 消息走 chat.SendMsg(msg=..., at=...)——参考项目 3353 行
+
+    chat.who 配置为工作群：子窗口命中校验按 .who 比对（对齐原生
+    _get_verified_subwindow），MagicMock 默认属性不匹配会被降级主窗口。
+    """
     wx = FakeWx()
     chat = MagicMock()
+    chat.who = "工作群"
     monkeypatch.setattr(wx, "GetSubWindow", lambda nickname=None: chat if nickname == "工作群" else None)
-    _dispatch("msg.send", {"who": "工作群", "text": "通知", "at": "李四"}, wx)
+    r = _dispatch("msg.send", {"who": "工作群", "text": "通知", "at": "李四"}, wx)
     chat.SendMsg.assert_called_once_with(msg="通知", at="李四")
+    assert r["via"] == "chat"
 
 
 # ══════════ was_send_success 双形态（附录 B） ══════════
@@ -396,7 +451,8 @@ def test_msg_send_at_uses_chat_sendmsg(monkeypatch):
 
 def test_msg_send_dict_success_status(fakewx):
     fakewx.send_result = {"status": "success"}
-    assert _dispatch("msg.send", {"who": "a", "text": "b"}, fakewx) == {"ok": True}
+    r = _dispatch("msg.send", {"who": "a", "text": "b"}, fakewx)
+    assert r["ok"] is True and r["via"] == "main"
 
 
 def test_msg_send_dict_failure_raises(fakewx):

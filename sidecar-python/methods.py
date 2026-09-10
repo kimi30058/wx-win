@@ -406,25 +406,62 @@ def _is_online(params, wx, msg_pool, msg_pool_ts, notify, mock):
 
 
 def _msg_send(params, wx, msg_pool, msg_pool_ts, notify, mock):
-    """wx.SendMsg(msg=..., who=...)——关键字名必须是 msg/who（附录 A）
+    """发文本：子窗口直发优先，主窗口三步导航兜底（2026-09-10 P0 重写）
 
-    at 场景：wx.SendMsg 不带 at → 定位子窗口 chat.SendMsg(msg=..., at=...)。
+    事故背景：旧实现普通分支一律 wx.SendMsg(who=)（主窗口搜索→切换→发送
+    整套 UIA 导航），监听引擎运行期间主窗口上下文本就是已知不稳定面
+    （msg.forward 的注释自证「AddListenChat 后失效」）——微信异常时该导航
+    挂起，sidecar 单线程被占死，服务端 60s 指令超时连环炸。
+
+    对齐原生 SiverWXbot 的设计原则（有子窗口绝不走主窗口）：
+    - 路径①（主路径，AI 回复几乎全走）：目标已有监听子窗口 →
+      GetSubWindow 校验 .who 后 chat.SendMsg 直发，零主窗口导航
+      （原生 wx_send_ai 用回调携带的 chat 直发，wxbot_core.py:3596-3610）
+    - 路径②（兜底，无子窗口 = 主动下发/定时场景）：SwitchToChat 切回
+      消息页 → ChatWith(who=) 定位会话 → wx.SendMsg（原生 Pass_New_Friends
+      同款三步，wxbot_core.py:4453-4460）；ChatWith UIA 超时包装为带排查
+      指引的业务错误（-32000），真机日志可直接裁决
+
+    at 场景两路径同构：chat.SendMsg(msg=..., at=...)（附录 A）。
+    返回值带 via（chat|main）——真机日志可直接裁决走的哪条路。
     """
     p = params
-    if p.get("at"):
-        chat = wx.GetSubWindow(nickname=p["who"])
-        if chat is None:
-            wx.ChatWith(who=p["who"])
-            time.sleep(0.5)
-            chat = wx.GetSubWindow(nickname=p["who"])
-        if chat is None:
-            raise SidecarError(f"窗口未找到: {p['who']}")
-        r = chat.SendMsg(msg=p["text"], at=p["at"])
-    else:
-        r = wx.SendMsg(msg=p["text"], who=p["who"])
+    who = p["who"]
+    # 路径①：子窗口直发（GetSubWindow 命中 + .who 校验，防拿到错窗）
+    chat = None
+    try:
+        cand = wx.GetSubWindow(nickname=who)
+        if cand is not None and str(getattr(cand, "who", "")) == who:
+            chat = cand
+    except Exception as e:  # noqa: BLE001 — 探测失败降级主窗口路径，不在此炸
+        sidecar_log.log("WARN", f"GetSubWindow 探测失败(降级主窗口路径): {type(e).__name__}: {e}")
+    if chat is not None:
+        try:
+            r = chat.SendMsg(msg=p["text"], at=p.get("at"))
+        except Exception as e:  # noqa: BLE001 — 子窗口直发异常降级主窗口重发
+            sidecar_log.log("WARN", f"子窗口直发异常(降级主窗口重发): {type(e).__name__}: {e}")
+            r = False
+        if was_send_success(r):
+            return {"ok": True, "via": "chat"}
+        sidecar_log.log(
+            "WARN", f"子窗口直发失败(降级主窗口重发): {send_error_message(r)}"
+        )
+
+    # 路径②：主窗口三步导航（切回消息页 → 定位会话 → 发送）
+    try:
+        wx.SwitchToChat()
+        time.sleep(0.5)
+        wx.ChatWith(who=who)
+        time.sleep(0.5)
+    except Exception as e:  # noqa: BLE001 — 主窗口导航类失败统一包装
+        raise SidecarError(_main_window_hint(f"向 {who} 发送（定位会话）", e)) from e
+    r = wx.SendMsg(msg=p["text"], who=who)
     if not was_send_success(r):
         raise SidecarError(send_error_message(r))
-    return {"ok": True}
+    out = {"ok": True, "via": "main"}
+    if chat is not None:
+        out["degraded"] = "子窗口直发失败已降级主窗口重发"
+    return out
 
 
 def _file_send(params, wx, msg_pool, msg_pool_ts, notify, mock):
