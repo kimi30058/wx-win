@@ -8,6 +8,7 @@ pub mod agent_link;
 pub mod bootstrap;
 pub mod cli;
 pub mod config;
+pub mod outbox;
 pub mod sidecar;
 pub mod state;
 pub mod transport;
