@@ -322,11 +322,16 @@ for line in sys.stdin:
                 *slot_write(&self.link) = None;
                 tracing::info!("AgentLink 已停止（GUI disconnect）");
                 // ws_connected 已由 halt 复位 false——现场探测组装必得 false 帧Payload；
-                // wxOnline 走 sidecar 现场探测（微信本身可能仍在线，两灯独立）
-                let online = self.session.health_probe().await;
+                // wxOnline/wxState 走 sidecar 现场三态探测（微信本身可能仍在线，两灯独立）
+                let health = self.session.probe_health().await;
                 let listeners = self.listeners.list().await.len();
                 let status = crate::ui_events::with_ws_connected(
-                    &wxauto_desktop::agent_link::inbound::status_event(online, listeners, true),
+                    &wxauto_desktop::agent_link::inbound::status_event(
+                        health.is_online(),
+                        health.as_str(),
+                        listeners,
+                        true,
+                    ),
                     link.ws_connected(),
                 );
                 self.bridge.forward_event_frame(&status).await;

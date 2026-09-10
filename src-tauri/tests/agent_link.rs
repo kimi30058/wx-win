@@ -20,7 +20,7 @@ use wxauto_desktop::agent_link::pending::CommandTracker;
 use wxauto_desktop::agent_link::AgentLink;
 use wxauto_desktop::sidecar::SidecarHandle;
 use wxauto_desktop::wx::listener::ListenerRegistry;
-use wxauto_desktop::wx::WxSession;
+use wxauto_desktop::wx::{WxHealth, WxSession};
 
 /// 剧本 sidecar：
 /// - msg.send 按 text 内容回放 image / voice 两条 message.received 通知之一再回 result
@@ -175,12 +175,18 @@ fn test_friend_request_and_status_event_fields() {
     assert_eq!(f["data"]["msg"], "请求添加好友");
     assert!(f["ts"].as_u64().expect("ts 应为数字") > 0);
 
-    let s = status_event(true, 3, true);
+    let s = status_event(true, "online", 3, true);
     assert_eq!(s["kind"], "event");
     assert_eq!(s["type"], "status");
     assert_eq!(s["data"]["wxOnline"], true);
+    assert_eq!(s["data"]["wxState"], "online");
     assert_eq!(s["data"]["listeners"], 3);
     assert_eq!(s["data"]["sidecarAlive"], true);
+
+    // P1 三态：Unreachable 时 wxOnline 折叠 false，wxState 保留 probe_timeout
+    let s2 = status_event(false, "probe_timeout", 0, true);
+    assert_eq!(s2["data"]["wxOnline"], false);
+    assert_eq!(s2["data"]["wxState"], "probe_timeout");
 }
 
 // ---------- 端到端 ----------
@@ -435,12 +441,12 @@ async fn test_event_sink_receives_upstream_events_only() {
     );
 }
 
-// ---------- 修复 I1：health_probe 读 payload.online ----------
+// ---------- P1 三态健康探测（承 I1：health_probe 读 payload.online）----------
 
-/// wx.is_online 回 {"online": false}（微信退出、sidecar 存活）时 health_probe
-/// 必须为 false——只看 RPC Ok 会恒真，spec §5.1 掉线检测失效。
+/// wx.is_online 回 {"online": false}（微信退出、sidecar 存活）→ Offline：
+/// 只看 RPC Ok 会恒真（I1），折叠 bool 则与卡死不可分（P1）。
 #[tokio::test]
-async fn test_health_probe_reads_online_payload_false() {
+async fn test_probe_health_reads_online_payload_false() {
     // 剧本：wx.is_online 回 online=false（其余随意）
     let script = r#"
 import sys, json
@@ -459,22 +465,45 @@ for line in sys.stdin:
         .await
         .expect("spawn 失败");
     let session = WxSession::new(Arc::new(Mutex::new(handle)));
-    assert!(
-        !session.health_probe().await,
-        "wx.is_online 回 online=false 时 health_probe 必须为 false"
+    assert_eq!(
+        session.probe_health().await,
+        WxHealth::Offline,
+        "wx.is_online 回 online=false 时必须判 Offline（非 Online 防恒真，非 Unreachable 防误报卡死）"
     );
 }
 
-/// 对照组：online=true → health_probe true（防止修过头变恒 false）
+/// 对照组：online=true → Online（防止修过头变恒 false）
 #[tokio::test]
-async fn test_health_probe_reads_online_payload_true() {
+async fn test_probe_health_reads_online_payload_true() {
     let handle = SidecarHandle::spawn_with_python(SCRIPT, &[])
         .await
         .expect("spawn 失败");
     let session = WxSession::new(Arc::new(Mutex::new(handle)));
-    assert!(
-        session.health_probe().await,
-        "wx.is_online 回 online=true 时 health_probe 应为 true"
+    assert_eq!(
+        session.probe_health().await,
+        WxHealth::Online,
+        "wx.is_online 回 online=true 时应判 Online"
+    );
+}
+
+/// P1 核心剧本：sidecar 收帧后永不应答（UIA 挂起占死单线程的事故形态，
+/// 2026-09-10）→ 短超时探测必须判 Unreachable，而不是折叠成「微信掉线」。
+#[tokio::test]
+async fn test_probe_health_silent_sidecar_is_unreachable() {
+    // 剧本：读走请求但不回帧（模拟 dispatch 卡死在 UIA 调用里）
+    let script = r#"
+import sys
+for line in sys.stdin:
+    pass  # 吞帧不答：调用方超时
+"#;
+    let handle = SidecarHandle::spawn_with_python(script, &[])
+        .await
+        .expect("spawn 失败");
+    let session = WxSession::new(Arc::new(Mutex::new(handle)));
+    assert_eq!(
+        session.probe_health_with(Duration::from_millis(300)).await,
+        WxHealth::Unreachable,
+        "sidecar 静默无应答必须判 Unreachable（卡死域）——旧 bool 语义下这被误报为微信掉线"
     );
 }
 
@@ -730,7 +759,7 @@ mod event_id_tests {
         let fr = friend_request_event("王五", "请求添加好友");
         assert!(fr["eventId"].as_str().unwrap_or("").starts_with("evt-"));
 
-        let st = status_event(true, 1, true);
+        let st = status_event(true, "online", 1, true);
         assert!(st["eventId"].as_str().unwrap_or("").starts_with("evt-"));
     }
 }

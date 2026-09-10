@@ -59,12 +59,21 @@ pub fn friend_request_event(name: &str, msg: &str) -> Value {
     })
 }
 
-/// 状态变化 → event:status 帧（wxOnline / 监听数 / sidecar 存活）
-pub fn status_event(wx_online: bool, listeners: usize, sidecar_alive: bool) -> Value {
+/// 状态变化 → event:status 帧（wxOnline / wxState / 监听数 / sidecar 存活）
+///
+/// `wx_state`（P1 三态）：online / offline / probe_timeout——wxOnline 折叠
+/// bool 供前端灯（旧契约不变），wxState 保留「sidecar 卡死」与「微信掉线」
+/// 的区分（2026-09-10 事故：两者都折叠 false 误导排障）。
+pub fn status_event(wx_online: bool, wx_state: &str, listeners: usize, sidecar_alive: bool) -> Value {
     json!({
         "kind": "event",
         "type": "status",
-        "data": { "wxOnline": wx_online, "listeners": listeners, "sidecarAlive": sidecar_alive },
+        "data": {
+            "wxOnline": wx_online,
+            "wxState": wx_state,
+            "listeners": listeners,
+            "sidecarAlive": sidecar_alive,
+        },
         "eventId": next_event_id(),
         "ts": now_ms(),
     })

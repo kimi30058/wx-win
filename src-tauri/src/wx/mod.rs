@@ -61,6 +61,51 @@ pub fn is_read_only(action: &str) -> bool {
     )
 }
 
+/// 心跳探测超时（P1）：is_online 正常亚秒级往返，被卡死的 sidecar 连读帧
+/// 都不可能——不等满 RPC_TIMEOUT(30s)，5s 足够区分「应答慢」与「无应答」。
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 微信健康三态（P1：区分「真掉线」与「sidecar 卡死」）
+///
+/// 2026-09-10 事故：msg.send 的 UIA 挂起占死 sidecar 单线程 → is_online
+/// 心跳连坐排队超时 → 旧 bool 语义下「卡死」与「微信退出」都折叠成
+/// false，wxOnline 假翻转误导排障。三态后 Unreachable 独立成态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WxHealth {
+    /// RPC 应答 + IsOnline=true：微信在线可操作
+    Online,
+    /// RPC 应答 + IsOnline=false：微信退出/掉登录（sidecar 存活，应答正常）
+    Offline,
+    /// RPC 超时/进程死：sidecar 无响应（疑似 UIA 卡死，P2 watchdog 域）
+    Unreachable,
+}
+
+impl WxHealth {
+    /// 兼容旧 bool 语义（ping 帧 wxOnline / 前端灯）：仅 Online 为 true
+    pub fn is_online(&self) -> bool {
+        matches!(self, WxHealth::Online)
+    }
+
+    /// status 事件 data.wxState 字段值（camelCase WS 帧约定由 inbound 层负责）
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WxHealth::Online => "online",
+            WxHealth::Offline => "offline",
+            WxHealth::Unreachable => "probe_timeout",
+        }
+    }
+}
+
+/// 探测结果 → 三态（纯函数可单测；审查 I1 的三态化延伸：
+/// 只看 Ok 恒真已修，只折叠 bool 则丢掉「卡死」信息）
+fn map_probe_result(res: &Result<Value, RpcError>) -> WxHealth {
+    match res {
+        Ok(v) if v["online"].as_bool().unwrap_or(false) => WxHealth::Online,
+        Ok(_) => WxHealth::Offline,
+        Err(_) => WxHealth::Unreachable,
+    }
+}
+
 /// 微信会话：包住 sidecar 句柄，串行执行所有微信操作
 pub struct WxSession {
     sidecar: Arc<Mutex<SidecarHandle>>,
@@ -149,17 +194,24 @@ impl WxSession {
         Ok(result)
     }
 
-    /// 健康探测：wx.is_online 一次调用（不走拟人间隙，供 Supervisor 轮询）。
-    /// 读 result payload 的 `online` 布尔——微信退出但 sidecar 存活时 RPC 仍是
-    /// Ok({"online": false})，只看 Ok 会恒真（审查 I1）。
-    pub async fn health_probe(&self) -> bool {
-        self.sidecar
+    /// 健康探测：wx.is_online 一次调用（不走拟人间隙，供心跳泵/连接回调轮询）。
+    /// 三态（P1，2026-09-10 事故）：Ok+online=true → Online；Ok+online=false →
+    /// Offline（微信退出但 sidecar 存活）；Err（超时/进程死）→ Unreachable
+    /// （sidecar 疑似卡死——只看 Ok 会恒真（审查 I1），折叠成 bool 则
+    /// 「卡死」伪装成「掉线」，事故排障无从区分）。
+    pub async fn probe_health(&self) -> WxHealth {
+        self.probe_health_with(PROBE_TIMEOUT).await
+    }
+
+    /// 注入化内核（测试用短超时驱动 Unreachable 路径；对齐 execute_with_retry 模式）
+    pub async fn probe_health_with(&self, timeout: Duration) -> WxHealth {
+        let res = self
+            .sidecar
             .lock()
             .await
-            .call(methods::IS_ONLINE, json!({}))
-            .await
-            .map(|v| v["online"].as_bool().unwrap_or(false))
-            .unwrap_or(false)
+            .call_with_timeout(methods::IS_ONLINE, json!({}), timeout)
+            .await;
+        map_probe_result(&res)
     }
 
     /// 订阅 sidecar 通知流（message.received 等；透传给 agent_link 通知泵）
@@ -168,7 +220,7 @@ impl WxSession {
     }
 
     /// 热替换 sidecar 句柄（Supervisor 重启路径，Task 6 关键集成点）：
-    /// 锁内换新句柄，此后所有 execute/health_probe/subscribe 自动指向
+    /// 锁内换新句柄，此后所有 execute/probe_health/subscribe 自动指向
     /// 新 sidecar，「所有操作唯一入口」语义不变。
     ///
     /// 旧句柄处置（审查 I2 更正：kill_on_drop 已随 Child 移交 reaper 移除，
@@ -404,5 +456,52 @@ mod tests {
             q.get("at").is_some(),
             "quote_reply 应补 at 字段（缺省 null）"
         );
+    }
+
+    /// P1 三态映射：Ok+true→Online / Ok+false→Offline / Err→Unreachable。
+    /// 审查 I1 三态化延伸：Ok 但缺 online 键（旧 sidecar）判 Offline——
+    /// 保守但可区分「有应答」；Err（超时/进程死）判卡死域。
+    #[test]
+    fn test_map_probe_result_three_states() {
+        use crate::sidecar::protocol::RpcError;
+        assert_eq!(
+            map_probe_result(&Ok(json!({ "online": true }))),
+            WxHealth::Online
+        );
+        assert_eq!(
+            map_probe_result(&Ok(json!({ "online": false }))),
+            WxHealth::Offline
+        );
+        // Ok 但缺 online 键 / 非 bool：有应答，判 Offline（不判 Online 防恒真）
+        assert_eq!(map_probe_result(&Ok(json!({}))), WxHealth::Offline);
+        assert_eq!(
+            map_probe_result(&Ok(json!({ "online": "yes" }))),
+            WxHealth::Offline
+        );
+        // 三类 Err 全落 Unreachable（卡死域）
+        assert_eq!(
+            map_probe_result(&Err(RpcError::Timeout)),
+            WxHealth::Unreachable
+        );
+        assert_eq!(
+            map_probe_result(&Err(RpcError::Closed)),
+            WxHealth::Unreachable
+        );
+        assert_eq!(
+            map_probe_result(&Err(RpcError::Io("pipe broken".into()))),
+            WxHealth::Unreachable
+        );
+    }
+
+    /// P1 三态辅助：is_online 仅 Online 为 true；as_str 与 status 事件
+    /// wxState 字段值一致（前端/服务端排障锚点）
+    #[test]
+    fn test_wx_health_helpers() {
+        assert!(WxHealth::Online.is_online());
+        assert!(!WxHealth::Offline.is_online());
+        assert!(!WxHealth::Unreachable.is_online());
+        assert_eq!(WxHealth::Online.as_str(), "online");
+        assert_eq!(WxHealth::Offline.as_str(), "offline");
+        assert_eq!(WxHealth::Unreachable.as_str(), "probe_timeout");
     }
 }

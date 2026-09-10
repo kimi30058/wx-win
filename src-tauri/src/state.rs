@@ -462,11 +462,16 @@ impl Supervisor {
         }
         self.state.mark_ready().await;
 
-        // status 事件（wxOnline 现场探测 + 监听数 + sidecar 存活）
-        let online = self.session.health_probe().await;
+        // status 事件（三态健康现场探测 + 监听数 + sidecar 存活）
+        let health = self.session.probe_health().await;
         let n = self.listeners.list().await.len();
-        self.emit(crate::agent_link::inbound::status_event(online, n, true))
-            .await;
+        self.emit(crate::agent_link::inbound::status_event(
+            health.is_online(),
+            health.as_str(),
+            n,
+            true,
+        ))
+        .await;
     }
 
     /// 手动重跑 init 序列（激活成功后 activate_license 命令 / 前端「重新初始化」

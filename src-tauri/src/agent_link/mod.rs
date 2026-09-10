@@ -76,6 +76,21 @@ const FRIEND_POLL_MIN_SECS: u64 = 60;
 /// 好友申请轮询随机跨度（60~300s：min + 0..=240）
 const FRIEND_POLL_JITTER_SECS: u64 = 240;
 
+/// 三态健康告警文案（纯函数可单测；P1：卡死与掉线分开告警）
+fn health_alert_text(h: &crate::wx::WxHealth) -> (&'static str, &'static str) {
+    match h {
+        crate::wx::WxHealth::Online => ("微信已恢复", "心跳探测恢复在线"),
+        crate::wx::WxHealth::Offline => (
+            "微信掉线",
+            "心跳探测离线（微信关闭/掉登录/窗口不可操作）",
+        ),
+        crate::wx::WxHealth::Unreachable => (
+            "sidecar 无响应",
+            "心跳探测超时——sidecar 疑似 UIA 卡死，watchdog 将自动重启恢复",
+        ),
+    }
+}
+
 pub struct AgentLink {
     session: Arc<WxSession>,
     listeners: Arc<ListenerRegistry>,
@@ -169,20 +184,16 @@ impl AgentLink {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(client);
     }
 
-    /// 心跳 wxOnline 翻转告警（true→false 掉线 / false→true 恢复；
-    /// 变化才发天然防风暴）
-    async fn on_online_changed(&self, online: bool) {
+    /// 心跳健康态翻转告警（P1 三态：变化才发天然防风暴）
+    async fn on_health_changed(&self, health: &crate::wx::WxHealth) {
         if let Some(alert) = self
             .alert_sink
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
         {
-            if online {
-                alert.send("微信已恢复", "心跳探测恢复在线");
-            } else {
-                alert.send("微信掉线", "心跳探测离线（微信关闭/掉登录/窗口不可操作）");
-            }
+            let (title, detail) = health_alert_text(health);
+            alert.send(title, detail);
         }
     }
 
@@ -334,11 +345,16 @@ impl AgentLink {
             tracing::warn!(?failed, "部分监听重注册失败");
         }
 
-        // 初始 status 事件（wxOnline 现场探测；sidecarAlive=true——泵在跑即存活）
-        let online = self.session.health_probe().await;
+        // 初始 status 事件（三态健康现场探测；sidecarAlive=true——泵在跑即存活）
+        let health = self.session.probe_health().await;
         let listeners = self.listeners.list().await.len();
-        self.emit_event(inbound::status_event(online, listeners, true))
-            .await;
+        self.emit_event(inbound::status_event(
+            health.is_online(),
+            health.as_str(),
+            listeners,
+            true,
+        ))
+        .await;
     }
 
     /// 下行 command 处理：幂等 → session 执行 → result 帧 → 指令日志投递
@@ -477,11 +493,15 @@ impl AgentLink {
         }
     }
 
-    /// 心跳循环（独立 spawn）：30s ping + wxOnline（wx.is_online 现场探测）。
-    /// wxOnline 变化时向 event_sink 补发 status 事件（GUI 微信灯实时性来源，
-    /// 不必等 30s 轮询）；睡眠经 select 挂 halt 信号（停机响应即时）。
+    /// 心跳循环（独立 spawn）：30s ping + 三态健康探测（P1）。
+    ///
+    /// ping 帧的 wxOnline 保持 bool（服务端/前端旧契约）：仅 Online 为 true，
+    /// Offline/Unreachable 都发 false（保守可用性口径）。健康态变化时向
+    /// event_sink 补发 status 事件（带 wxState 三态字段，GUI 微信灯实时性
+    /// 来源）+ webhook 三态告警（卡死与掉线分开）；睡眠经 select 挂 halt
+    /// 信号（停机响应即时）。
     pub async fn heartbeat_loop(&self) {
-        let mut last_online: Option<bool> = None;
+        let mut last_health: Option<crate::wx::WxHealth> = None;
         let mut halt_rx = self.halt_tx.subscribe();
         loop {
             // 1s 心跳分片（挂 halt 信号：停机即醒）
@@ -508,21 +528,26 @@ impl AgentLink {
                 tracing::info!("心跳泵感知 halt，退出");
                 return;
             }
-            let online = self.session.health_probe().await;
+            let health = self.session.probe_health().await;
             self.send_frame(json!({
                 "kind": "ping",
-                "wxOnline": online,
+                "wxOnline": health.is_online(),
                 "ts": inbound::now_ms(),
             }))
             .await;
-            // wxOnline 变化 → GUI 补发 status（含 listeners/sidecarAlive 与初始口径一致）
-            if last_online != Some(online) {
-                last_online = Some(online);
+            // 健康态变化 → GUI 补发 status（wxState 三态）+ webhook 告警
+            if last_health != Some(health) {
+                last_health = Some(health);
                 // webhook 告警挂点：翻转才发（天然防风暴）
-                self.on_online_changed(online).await;
+                self.on_health_changed(&health).await;
                 let listeners = self.listeners.list().await.len();
-                self.emit_event(inbound::status_event(online, listeners, true))
-                    .await;
+                self.emit_event(inbound::status_event(
+                    health.is_online(),
+                    health.as_str(),
+                    listeners,
+                    true,
+                ))
+                .await;
             }
         }
     }
@@ -670,10 +695,15 @@ impl TransportHandler for LinkHandler {
         let session = self.link.session.clone();
         let listeners = self.link.listeners.clone();
         tokio::spawn(async move {
-            let online = session.health_probe().await;
+            let health = session.probe_health().await;
             let n = listeners.list().await.len();
             if let Some(sink) = sink.as_ref() {
-                sink(inbound::status_event(online, n, true));
+                sink(inbound::status_event(
+                    health.is_online(),
+                    health.as_str(),
+                    n,
+                    true,
+                ));
             }
         });
     }
@@ -684,6 +714,7 @@ mod alert_tests {
     use super::*;
     use crate::alert::AlertClient;
     use crate::sidecar::SidecarHandle;
+    use crate::wx::WxHealth;
     use std::sync::Arc;
 
     /// set_alert_sink 注入后可读回（RwLock 中毒恢复路径同 event_sink）
@@ -707,8 +738,27 @@ mod alert_tests {
                 .is_some(),
             "注入后应可读回"
         );
-        // 空 URL send 全链不炸（no-op）
-        link.on_online_changed(false).await;
-        link.on_online_changed(true).await;
+        // 空 URL send 全链不炸（no-op）；三态各走一遍
+        link.on_health_changed(&WxHealth::Offline).await;
+        link.on_health_changed(&WxHealth::Unreachable).await;
+        link.on_health_changed(&WxHealth::Online).await;
+    }
+
+    /// P1 三态告警文案：卡死（Unreachable）与掉线（Offline）分开——
+    /// 掉线指引用户看微信，卡死指引自愈路径（watchdog 重启）
+    #[test]
+    fn test_health_alert_text_three_states() {
+        let (t1, d1) = health_alert_text(&WxHealth::Online);
+        assert_eq!(t1, "微信已恢复");
+        assert!(d1.contains("恢复在线"));
+
+        let (t2, d2) = health_alert_text(&WxHealth::Offline);
+        assert_eq!(t2, "微信掉线");
+        assert!(d2.contains("微信关闭"), "掉线文案应指向微信侧原因");
+
+        let (t3, d3) = health_alert_text(&WxHealth::Unreachable);
+        assert_eq!(t3, "sidecar 无响应");
+        assert!(d3.contains("卡死"), "卡死文案应区分于掉线");
+        assert!(d3.contains("重启"), "卡死文案应指引自愈路径");
     }
 }
