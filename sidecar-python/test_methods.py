@@ -225,6 +225,45 @@ def test_init_real_path_licensed_ok(monkeypatch, capsys):
     assert "[SIDECAR]" in err
 
 
+def test_init_real_path_resets_listen_engine(monkeypatch, capsys):
+    """wx.init 成功路径必须复位监听引擎：StopListening → StartListening
+    （参考项目 init_wx_listeners wxbot_core.py:2462-2464，中间 sleep 1）。
+
+    sidecar 崩溃重启后 wxautox4 监听引擎残留脏态（旧回调/半注册会话），
+    不复位则后续 AddListenChat 全挂（2026-09-10 真机 08:16「部分监听
+    重注册失败」现场）。顺序铁律：先 stop 清场再 start。
+    """
+    calls = _install_fake_wxautox4(monkeypatch, licensed=True, wechat_ok=True)
+    _dispatch("wx.init", {}, None)
+    assert calls["engine"] == ["stop", "start"], (
+        f"引擎复位序列须为 stop→start，实际: {calls['engine']}"
+    )
+    err = capsys.readouterr().err
+    assert "监听引擎复位" in err  # 留痕（排障单行可裁决）
+
+
+def test_init_real_path_engine_reset_failure_not_fatal(monkeypatch, capsys):
+    """引擎复位抛异常不判 init 失败——降级 WARN 留痕（微信能构造成功说明
+    窗口在，引擎复位失败可能只是时序；把 init 判死会让激活页误报微信未开）。
+    """
+    _install_fake_wxautox4(monkeypatch, licensed=True, wechat_ok=True)
+    _orig = sys.modules["wxautox4"].WeChat
+
+    class _BoomEngine(_orig):
+        def StartListening(self):
+            raise RuntimeError("引擎启动超时")
+
+    sys.modules["wxautox4"].WeChat = _BoomEngine
+    try:
+        r = _dispatch("wx.init", {}, None)
+        assert r["licensed"] is True
+        assert "failReason" not in r
+        err = capsys.readouterr().err
+        assert "WARN" in err and "复位" in err
+    finally:
+        sys.modules["wxautox4"].WeChat = _orig
+
+
 def test_init_real_path_unlicensed(monkeypatch, capsys):
     """未授权：failReason=licensed（WeChat 同失败也不改口径——授权是可行动根因）"""
     _install_fake_wxautox4(monkeypatch, licensed=False, wechat_ok=False)
@@ -450,6 +489,128 @@ def test_listen_add_triple_verification_failure(fakewx):
     fakewx.AddListenChat = bad_add
     with pytest.raises(methods.SidecarError, match="三重校验"):
         _dispatch("listen.add", {"nickname": "客户群"}, fakewx)
+
+
+# ══════════ listen.add 窗口态预热（2026-09-10 真机四类失败修复） ══════════
+
+
+def test_listen_add_prewarms_chat_with(fakewx):
+    """AddListenChat 前必须 ChatWith(who=nickname) 预热——wxautox4 在主窗口
+    会话列表里搜目标会话，目标不在近期会话（如新群刚建）时 AddListenChat
+    直接失败（2026-09-10 真机「测试群1」三重校验全挂根因之一）。"""
+    _dispatch("listen.add", {"nickname": "客户群"}, fakewx)
+    assert fakewx.opened == ["客户群"]  # 先 ChatWith 再 AddListenChat
+
+
+def test_listen_add_triple_failure_reports_window_state(fakewx):
+    """三重校验耗尽的 SidecarError 必须携带窗口态细节（主窗口在线态 +
+    已开子窗口数）——旧文案只有昵称，真机排障无法裁决「主窗口最小化 /
+    被遮挡 / 子窗口残留」哪一种。"""
+    import methods
+
+    def bad_add(nickname=None, callback=None):
+        return {"message": "注册失败"}
+
+    fakewx.AddListenChat = bad_add
+    fakewx.sub_windows = [FakeChat("旧监听A"), FakeChat("旧监听B")]
+    with pytest.raises(methods.SidecarError) as ei:
+        _dispatch("listen.add", {"nickname": "客户群"}, fakewx)
+    msg = str(ei.value)
+    assert "客户群" in msg
+    assert "注册失败" in msg  # 每轮 AddListenChat 的错误信息入列
+    assert "子窗口=2" in msg  # 已开子窗口数（残留诊断）
+    assert "主窗口" in msg  # 主窗口在线态
+
+
+def test_listen_add_uia_exception_captured_into_detail(fakewx):
+    """AddListenChat 抛 UIA LookupError 不再裸穿 -32603——捕获入每轮
+    错误列表（真机 08:16 现场：LookupError: Find Control Timeout 混着
+    -32000 文案出现，前端无法引导）。"""
+    import methods
+
+    def boom_add(nickname=None, callback=None):
+        raise LookupError("Find Control Timeout: {Name: '会话列表'}")
+
+    fakewx.AddListenChat = boom_add
+    with pytest.raises(methods.SidecarError, match="Find Control Timeout"):
+        _dispatch("listen.add", {"nickname": "客户群"}, fakewx)
+
+
+def test_listen_add_uia_exception_on_verification_captured(fakewx):
+    """校验阶段（GetAllSubWindow/GetSubWindow）抛 UIA 异常同样入列不裸穿。"""
+    import methods
+
+    def boom_subwindows():
+        raise LookupError("Find Control Timeout: {Name: '消息列表'}")
+
+    fakewx.GetAllSubWindow = boom_subwindows
+    with pytest.raises(methods.SidecarError, match="Find Control Timeout"):
+        _dispatch("listen.add", {"nickname": "客户群"}, fakewx)
+
+
+# ══════════ friends/moments 主窗口导航前置校验 ══════════
+
+
+def test_new_requests_uia_failure_wraps_actionable_hint(fakewx):
+    """GetNewFriends 抛 LookupError（主窗口不可操作：最小化/被遮挡/通讯录
+    导航失败）→ SidecarError 带排查指引而非裸 -32603（真机 08:16 现场直接
+    错误帧 'LookupError: Find Control Timeout ... 新的朋友'）。"""
+    import methods
+
+    def boom(acceptable=None):
+        raise LookupError("Find Control Timeout: {Name: '新的朋友'}")
+
+    fakewx.GetNewFriends = boom
+    with pytest.raises(methods.SidecarError) as ei:
+        _dispatch("friends.new_requests", {}, fakewx)
+    msg = str(ei.value)
+    assert "新的朋友" in msg  # 原始异常保留
+    assert "最小化" in msg  # 排查指引
+
+
+def test_new_requests_restores_chat_page(fakewx):
+    """GetNewFriends 会把主窗口导航到通讯录页——结束必须 SwitchToChat()
+    切回聊天页（参考项目 Pass_New_Friends wxbot_core.py:4467 收尾）。
+
+    不切回则主窗口停在通讯录页，后续 AddListenChat 在会话列表里搜目标
+    必败（2026-09-10 真机 08:15 用户加监听失败与 08:16 好友泵报错的
+    时序关联：好友泵每 60~300s 污染一次主窗口页面态）。
+    """
+    fakewx.new_friends = [FakeFriend("申请人A")]
+    _dispatch("friends.new_requests", {}, fakewx)
+    assert fakewx.switched >= 1  # SwitchToChat 收尾
+
+
+def test_new_requests_restore_failure_not_fatal(fakewx):
+    """SwitchToChat 收尾失败只 WARN 不炸结果——好友列表已取到，导航残留
+    交给下一轮轮询自愈（下次 GetNewFriends 会重新导航）。"""
+    fakewx.new_friends = [FakeFriend("申请人A")]
+    called = {"n": 0}
+
+    def boom_switch():
+        called["n"] += 1
+        raise LookupError("Find Control Timeout: {Name: '聊天'}")
+
+    fakewx.SwitchToChat = boom_switch
+    r = _dispatch("friends.new_requests", {}, fakewx)
+    assert called["n"] >= 1  # 检测力：收尾确实被调用（旧实现不调则假绿）
+    assert r["requests"][0]["name"] == "申请人A"
+
+
+def test_moments_get_uia_failure_wraps_actionable_hint(fakewx):
+    """朋友圈打开/读取抛 UIA 异常 → 同款带指引包装（Close 兜底不丢）。"""
+    import methods
+
+    class BoomMoments:
+        def GetMoments(self):
+            raise LookupError("Find Control Timeout: {Name: '朋友圈'}")
+
+        def Close(self):
+            self.closed = True
+
+    fakewx.Moments = lambda: BoomMoments()
+    with pytest.raises(methods.SidecarError, match="最小化"):
+        _dispatch("moments.get", {"count": 1}, fakewx)
 
 
 def test_listen_remove_reports_still_exists(fakewx):
@@ -910,7 +1071,7 @@ def _install_fake_wxautox4(monkeypatch, licensed=True, authenticate_result=True,
     """
     import types
 
-    calls = {"authenticate": []}
+    calls = {"authenticate": [], "engine": []}
 
     def _check_license():
         if license_exits:
@@ -929,6 +1090,12 @@ def _install_fake_wxautox4(monkeypatch, licensed=True, authenticate_result=True,
         def __init__(self, version=None):
             if not wechat_ok:
                 raise RuntimeError("微信窗口未找到")
+
+        def StopListening(self):
+            calls["engine"].append("stop")
+
+        def StartListening(self):
+            calls["engine"].append("start")
 
     useful = types.ModuleType("wxautox4.utils.useful")
     useful.check_license = _check_license

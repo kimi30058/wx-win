@@ -74,6 +74,79 @@ def send_error_message(result):
     return "发送失败"
 
 
+# ── 窗口态工具（2026-09-10 真机四类失败：UIA 超时的可诊断化）────────
+
+
+def _reset_listen_engine(wx):
+    """监听引擎复位：StopListening → sleep 1 → StartListening（对齐参考
+    项目 init_wx_listeners wxbot_core.py:2462-2464）。
+
+    sidecar 崩溃重启后 wxautox4 引擎可能残留脏态（旧回调/半注册会话），
+    不复位则后续 AddListenChat 全挂。任何一步失败降级 WARN——实例构造
+    成功说明窗口在，引擎复位失败可能只是时序，不判 init 失败。
+    """
+    try:
+        wx.StopListening()
+        time.sleep(1)
+        wx.StartListening()
+        sidecar_log.log("INFO", "监听引擎复位完成(StopListening→StartListening)")
+    except Exception as e:  # noqa: BLE001 — 复位失败降级：窗口在（构造成功），不判 init 死
+        sidecar_log.log("WARN", f"监听引擎复位失败(不阻断 init，后续 AddListenChat 可能需重试): {type(e).__name__}: {e}")
+
+
+# Windows 防睡眠常量（SetThreadExecutionState，参考项目 web_server.py:1221）
+_ES_CONTINUOUS = 0x80000000
+_ES_SYSTEM_REQUIRED = 0x00000001
+_ES_DISPLAY_REQUIRED = 0x00000002
+
+
+def _prevent_sleep():
+    """阻止 Windows 自动锁屏/黑屏/睡眠（对齐参考项目 _prevent_sleep）。
+
+    UIA 模拟操作要求窗口可见——屏幕睡眠/锁屏后控件搜索全部超时，正是
+    「Find Control Timeout」四类失败的环境杀手。非 Windows 静默跳过；
+    失败只 WARN（不阻断 init——桌面用户可能有意保持锁屏策略）。
+    """
+    try:
+        import ctypes  # noqa: PLC0415
+
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED | _ES_DISPLAY_REQUIRED
+        )
+        sidecar_log.log("INFO", "已阻止系统自动锁屏/睡眠（UIA 自动化要求窗口可见）")
+    except AttributeError:
+        pass  # 非 Windows（开发/CI）无 windll——静默跳过
+    except Exception as e:  # noqa: BLE001 — 防睡眠失败不阻断主流程
+        sidecar_log.log("WARN", f"设置防睡眠状态失败: {e}")
+
+
+def _window_state(wx):
+    """采集窗口态细节（IsOnline + 已开子窗口数）——三重校验/导航类失败的
+    SidecarError 文案带上它，真机日志可直接裁决「主窗口最小化 / 被遮挡 /
+    子窗口残留」哪一种。探测本身失败不炸（返回占位文本）。"""
+    try:
+        online = bool(wx.IsOnline())
+    except Exception:  # noqa: BLE001 — 诊断探测不得引入新失败面
+        online = "?"
+    try:
+        n = len(wx.GetAllSubWindow() or [])
+    except Exception:  # noqa: BLE001
+        n = "?"
+    return f"主窗口={'正常' if online is True else '离线' if online is False else online}, 子窗口={n}"
+
+
+def _main_window_hint(prefix, e):
+    """主窗口导航类 UIA 失败的统一文案：原始异常 + 排查指引。
+
+    wxautox4 是 UIA 模拟操作：主窗口最小化/被遮挡/目标不在会话列表时
+    控件搜索超时（LookupError: Find Control Timeout）。参考项目文档
+    「注意事项」：主窗口不得最小化、启动时只保留主窗口。"""
+    return (
+        f"{prefix}失败（微信主窗口不可操作——请确认：主窗口未最小化、"
+        f"未被其他窗口遮挡、微信在前台登录态）: {type(e).__name__}: {e}"
+    )
+
+
 # ── msg 池工具 ──────────────────────────────────────────────
 
 
@@ -135,12 +208,19 @@ def _loc_msg_str(m):
 
 def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
     """wx.init：WxParam 全局参数 → WeChat(version) 中英文双兜底 → check_license
+    → 监听引擎复位（StopListening → sleep 1 → StartListening）
 
     wx 实参为 None（sidecar.py 对 wx.init 特判惰性求值）；实例存 _instance。
     失败三态：failReason 取 "licensed"（未授权）或 "wechat_missing"
     （授权过但微信未开）；成功时无该字段。failDetail 携带 wechat_missing
     场景的异常细节（类型: 消息）——判定条件无法区分微信没开/未登录/版本
     超区间，细节是真机排障裁决真实根因的唯一线索。
+
+    监听引擎复位（2026-09-10 补齐，对齐参考项目 init_wx_listeners
+    wxbot_core.py:2462-2464）：sidecar 崩溃重启后 wxautox4 内部引擎残留
+    脏态（旧回调/半注册会话），不复位则后续 AddListenChat 全挂（真机
+    08:16「部分监听重注册失败」现场）。实例构造成功但引擎复位失败时降级
+    WARN 不判 init 失败（窗口在，引擎可能只是时序问题）。
     """
     global _instance, _license_ok
     if mock:
@@ -160,7 +240,12 @@ def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
             }
         return {"licensed": True, "wxid": "mock_wx", "nickname": "模拟设备"}
     # 真实导入（仅 Windows + 已 pip install wxautox4 时可达）
+    _prevent_sleep()
     sidecar_log.log("INFO", "wx.init 开始（真实模式）")
+    # 先清上一轮实例：重试 init 时构造失败路径不清会残留旧实例——本轮
+    # wechat_missing 但 _instance 仍指旧窗口，引擎复位操作死句柄 + sidecar
+    # 后续调用误用陈旧实例
+    _instance = None
     try:
         with sidecar_log.guard_stdout():
             from wxautox4 import WeChat, WxParam  # noqa: PLC0415 — 延迟导入是硬要求（Linux 无此库）
@@ -189,6 +274,8 @@ def _init(params, wx, msg_pool, msg_pool_ts, notify, mock):
                     if _license_ok:
                         fail_reason = "wechat_missing"
                         fail_detail = f"{type(e2).__name__}: {e2}"
+            if _instance is not None:
+                _reset_listen_engine(_instance)
             result = {
                 "licensed": _license_ok,
                 "wxid": getattr(_instance, "wxid", ""),
@@ -410,11 +497,19 @@ def _chat_history(params, wx, msg_pool, msg_pool_ts, notify, mock):
 
 
 def _listen_add(params, wx, msg_pool, msg_pool_ts, notify, mock):
-    """listen.add：AddListenChat(nickname=..., callback=...) + 三重校验重试
+    """listen.add：ChatWith 预热 + AddListenChat(nickname=..., callback=...) + 三重校验重试
 
     三重校验（spec §2.3）：①返回值判定（dict 带错误信息=失败）
     ②GetAllSubWindow 集合比对 ③GetSubWindow 单个校验；每轮 AddListenChat
     前置 sleep 0.5s；三重全失败才报错。
+
+    2026-09-10 真机修复（「测试群1」三重校验全挂）：
+    - AddListenChat 前先 ChatWith(who=nickname) 预热——wxautox4 在主窗口
+      会话列表里搜目标会话，目标不在近期会话（新群/久未活跃）时直接失败；
+    - 每轮 AddListenChat / 校验阶段的 UIA 异常捕获入错误列表（旧实现裸穿
+      -32603 LookupError，与 -32000 文案混杂，前端无法引导）；
+    - 耗尽的 SidecarError 携带窗口态（IsOnline + 子窗口数），真机日志
+      可直接裁决主窗口最小化/遮挡/子窗口残留。
     """
     import uuid  # noqa: PLC0415 — 回调热路径外导入，避免模块级依赖
 
@@ -433,20 +528,45 @@ def _listen_add(params, wx, msg_pool, msg_pool_ts, notify, mock):
         except Exception as e:  # noqa: BLE001 — 回调内异常上抛会杀 wxautox4 监听线程
             sidecar_log.log("ERROR", f"message.received 回调异常: {e}")
 
+    errors = []
     for _attempt in range(3):
         time.sleep(0.5)
-        r = wx.AddListenChat(nickname=nickname, callback=on_msg)
+        # 预热：把目标会话顶入主窗口会话列表（ChatWith 定位是参考项目所有
+        # UIA 操作的统一前置）；失败不重试预热——直接进 AddListenChat 三重
+        # 校验兜底（预热失败大概率与 AddListenChat 同因，避免双倍超时等待）
+        try:
+            wx.ChatWith(who=nickname)
+        except Exception as e:  # noqa: BLE001 — UIA 异常入列，不阻断校验流程
+            errors.append(f"ChatWith 预热失败: {type(e).__name__}: {e}")
+        try:
+            r = wx.AddListenChat(nickname=nickname, callback=on_msg)
+        except Exception as e:  # noqa: BLE001 — UIA 异常入列（不再裸穿 -32603）
+            errors.append(f"AddListenChat 异常: {type(e).__name__}: {e}")
+            continue
         # 校验①：返回 dict 带错误信息 → 本轮失败，重试
         if isinstance(r, dict) and r.get("message"):
+            errors.append(f"AddListenChat 返回错误: {r['message']}")
             continue
         # 校验②：子窗口集合比对
-        names = [str(getattr(c, "who", "")) for c in (wx.GetAllSubWindow() or [])]
+        try:
+            names = [str(getattr(c, "who", "")) for c in (wx.GetAllSubWindow() or [])]
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"GetAllSubWindow 异常: {type(e).__name__}: {e}")
+            continue
         if nickname in names:
             return {"ok": True, "verified": True}
         # 校验③：单窗口校验
-        if wx.GetSubWindow(nickname=nickname):
-            return {"ok": True, "verified": True}
-    raise SidecarError(f"监听注册失败(三重校验未通过): {nickname}")
+        try:
+            if wx.GetSubWindow(nickname=nickname):
+                return {"ok": True, "verified": True}
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"GetSubWindow 异常: {type(e).__name__}: {e}")
+    detail = "; ".join(errors[-3:])  # 尾部 3 条防文案爆炸
+    state = _window_state(wx)
+    raise SidecarError(
+        f"监听注册失败(三重校验未通过): {nickname}（{state}）"
+        f"——请确认微信主窗口未最小化/未被遮挡、目标会话名与微信一致。{detail}"
+    )
 
 
 def _listen_remove(params, wx, msg_pool, msg_pool_ts, notify, mock):
@@ -463,15 +583,45 @@ def _listen_list(params, wx, msg_pool, msg_pool_ts, notify, mock):
 
 
 def _new_requests(params, wx, msg_pool, msg_pool_ts, notify, mock):
-    """friends.new_requests：GetNewFriends(acceptable=True) 读 .name（附录 A）"""
-    friends = wx.GetNewFriends(acceptable=True) or []
-    return {"requests": [{"name": str(getattr(f, "name", ""))} for f in friends]}
+    """friends.new_requests：GetNewFriends(acceptable=True) 读 .name（附录 A）
+
+    UIA 异常包装（2026-09-10 真机）：GetNewFriends 要在主窗口导航到
+    通讯录→新的朋友页，主窗口最小化/被遮挡时控件搜索超时抛 LookupError
+    ——包装为带排查指引的业务错误（-32000），而非裸 -32603。
+
+    页面复位（对齐参考项目 Pass_New_Friends wxbot_core.py:4467 收尾）：
+    读完 SwitchToChat() 切回聊天页——不切回则主窗口停在通讯录页，后续
+    AddListenChat 在会话列表搜目标必败（好友泵每 60~300s 污染一次页面态，
+    与真机 08:15 加监听失败的时序吻合）。收尾失败只 WARN（列表已取到，
+    残留态由下一轮轮询自愈）。
+    """
+    try:
+        friends = wx.GetNewFriends(acceptable=True) or []
+    except Exception as e:  # noqa: BLE001 — 主窗口导航类 UIA 失败统一包装
+        _restore_chat_page_quietly(wx)
+        raise SidecarError(_main_window_hint("获取新的好友", e)) from e
+    result = {"requests": [{"name": str(getattr(f, "name", ""))} for f in friends]}
+    _restore_chat_page_quietly(wx)
+    return result
+
+
+def _restore_chat_page_quietly(wx):
+    """主窗口切回聊天页（SwitchToChat）——失败只 WARN 不炸结果路径。
+
+    即便 GetNewFriends 失败也尝试复位（导航可能已完成了一半，停在
+    通讯录页会污染后续操作）。
+    """
+    try:
+        wx.SwitchToChat()
+    except Exception as e:  # noqa: BLE001 — 收尾失败降级
+        sidecar_log.log("WARN", f"切回聊天页失败(主窗口可能停在通讯录页): {type(e).__name__}: {e}")
 
 
 def _friend_accept(params, wx, msg_pool, msg_pool_ts, notify, mock):
     """friend.accept：accept(remark, tags) + GBK 32 截断 + sleep 5s + SwitchToChat 收尾
 
     （附录 A「好友」节：备注 GBK 32 截断；accept 后 sleep 5s；SwitchToChat 收尾）
+    GetNewFriends 的 UIA 异常包装同 _new_requests（2026-09-10 真机修复）。
     """
     name = params["name"]
     remark = params.get("remark", "")
@@ -479,7 +629,10 @@ def _friend_accept(params, wx, msg_pool, msg_pool_ts, notify, mock):
         # GBK 32 字节截断（wxautox4 备注列超长会失败）；encode 侧 errors=ignore
         # 防 emoji 等非 GBK 字符直接 UnicodeEncodeError，decode 侧防截在多字节中间
         remark = remark.encode("gbk", errors="ignore")[:32].decode("gbk", errors="ignore")
-    friends = wx.GetNewFriends(acceptable=True) or []
+    try:
+        friends = wx.GetNewFriends(acceptable=True) or []
+    except Exception as e:  # noqa: BLE001 — 主窗口导航类 UIA 失败统一包装
+        raise SidecarError(_main_window_hint("获取新的好友", e)) from e
     for f in friends:
         if str(getattr(f, "name", "")) == name:
             f.accept(remark=remark or None, tags=params.get("tags") or None)
@@ -490,15 +643,26 @@ def _friend_accept(params, wx, msg_pool, msg_pool_ts, notify, mock):
 
 
 def _moments_get(params, wx, msg_pool, msg_pool_ts, notify, mock):
-    """moments.get：Moments() → GetMoments() → Close()，步骤间 1~5s 拟人延时"""
+    """moments.get：Moments() → GetMoments() → Close()，步骤间 1~5s 拟人延时
+
+    UIA 异常包装（2026-09-10 真机）：朋友圈窗口开在主窗口之上，主窗口
+    最小化/被遮挡时 Moments()/GetMoments() 控件搜索超时——包装为带排查
+    指引的业务错误；Close 兜底不丢（窗口泄漏会卡后续操作）。
+    """
     import random  # noqa: PLC0415
 
-    pyq = wx.Moments()
+    try:
+        pyq = wx.Moments()
+    except Exception as e:  # noqa: BLE001 — 主窗口导航类 UIA 失败统一包装
+        raise SidecarError(_main_window_hint("打开朋友圈", e)) from e
     if not pyq:
         raise SidecarError("朋友圈窗口打开失败")
     try:
         time.sleep(random.uniform(1, 5))
-        moments = pyq.GetMoments() or []
+        try:
+            moments = pyq.GetMoments() or []
+        except Exception as e:  # noqa: BLE001
+            raise SidecarError(_main_window_hint("读取朋友圈", e)) from e
         items = [
             {"content": str(getattr(m, "content", "")), "sender": str(getattr(m, "sender", ""))}
             for m in moments[: params.get("count", 10)]
@@ -506,17 +670,24 @@ def _moments_get(params, wx, msg_pool, msg_pool_ts, notify, mock):
         time.sleep(random.uniform(1, 5))
         return {"moments": items}
     finally:
-        pyq.Close()  # 无论成功失败都关窗（UIA 窗口泄漏会卡后续操作）
+        try:
+            pyq.Close()  # 无论成功失败都关窗（UIA 窗口泄漏会卡后续操作）
+        except Exception as e:  # noqa: BLE001 — 关窗失败留痕不炸结果路径
+            sidecar_log.log("WARN", f"朋友圈 Close 失败(窗口可能残留): {e}")
 
 
 def _moments_publish(params, wx, msg_pool, msg_pool_ts, notify, mock):
     """moments.publish：Publish(text, images, privacy)——privacy 中文值（附录 A）
 
     privacy：{} 公开 / {'privacy': '白名单'|'黑名单', 'tags': [...]}；images 空→None。
+    UIA 异常包装同 moments.get（2026-09-10 真机四类失败修复）。
     """
     import random  # noqa: PLC0415
 
-    pyq = wx.Moments()
+    try:
+        pyq = wx.Moments()
+    except Exception as e:  # noqa: BLE001 — 主窗口导航类 UIA 失败统一包装
+        raise SidecarError(_main_window_hint("打开朋友圈", e)) from e
     if not pyq:
         raise SidecarError("朋友圈窗口打开失败")
     try:
@@ -529,11 +700,17 @@ def _moments_publish(params, wx, msg_pool, msg_pool_ts, notify, mock):
         else:
             cfg = {}
         images = params.get("images") or None
-        pyq.Publish(params.get("text", ""), images, cfg)
+        try:
+            pyq.Publish(params.get("text", ""), images, cfg)
+        except Exception as e:  # noqa: BLE001
+            raise SidecarError(_main_window_hint("发布朋友圈", e)) from e
         time.sleep(random.uniform(2, 5))
         return {"ok": True}
     finally:
-        pyq.Close()
+        try:
+            pyq.Close()
+        except Exception as e:  # noqa: BLE001 — 关窗失败留痕不炸结果路径
+            sidecar_log.log("WARN", f"朋友圈 Close 失败(窗口可能残留): {e}")
 
 
 def _media_download(params, wx, msg_pool, msg_pool_ts, notify, mock):
