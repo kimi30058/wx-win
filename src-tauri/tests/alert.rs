@@ -61,8 +61,13 @@ async fn test_send_posts_rendered_payload_to_url() {
 /// 200 + code≠0（飞书应用层拒绝）——只 warn 不 panic（守护不炸语义即可）
 #[tokio::test]
 async fn test_send_app_level_rejection_only_warns() {
+    // Content-Length 必须与 body 实际字节数（36）一致：声明过短会让 reqwest
+    // 只读前 19 字节得到截断非法 JSON，do_send 的 serde_json::from_str 走 Err
+    // 静默跳过，「code≠0 应用层拒绝」分支永远不可达（I1）。
+    // CL=36 → body 完整到达 → from_str 成功 → code=19021≠0 触发 warn 路径
+    // ——这是「只 warn 不炸」语义的可观察下界（不 panic 即通过）。
     let (url, mut rx) = spawn_http_responder_full(
-        "HTTP/1.1 200 OK\r\nContent-Length: 19\r\n\r\n{\"code\": 19021, \"msg\": \"sign error\"}"
+        "HTTP/1.1 200 OK\r\nContent-Length: 36\r\n\r\n{\"code\": 19021, \"msg\": \"sign error\"}"
             .to_string(),
     )
     .await;
