@@ -48,12 +48,17 @@ def _clear_dedup_window():
 class FakeMsg:
     """伪造 wxautox4 Message 对象（附录 A：属性 type/attr/sender/content/id/is_at）"""
 
+    # 原生 id 每实例唯一（对齐真实库；I1 后去重键 id 优先，共享 id 会让
+    # 不同消息互相误吞）；需走内容指纹路径的用例显式 del msg.id
+    _id_seq = 0
+
     def __init__(self, content="hello", mtype="text", attr="friend", sender="张三"):
         self.content = content
         self.type = mtype
         self.attr = attr
         self.sender = sender
-        self.id = "msg_obj_1"
+        FakeMsg._id_seq += 1
+        self.id = f"msg_obj_{FakeMsg._id_seq}"
         self.downloaded = None
         self.text = "语音转写文本"
         self.quoted = None
@@ -699,14 +704,17 @@ def test_listen_callback_msg_id_falls_back_to_uuid(fakewx):
 
 
 def test_dedup_same_fingerprint_within_window_swallowed(fakewx):
-    """同指纹（会话+发送人+内容+类型）5s 内第二次回调被吞——notify 不再触发"""
+    """同指纹（会话+发送人+内容+类型）5s 内第二次回调被吞——notify 不再触发
+
+    I1 后去重键 id 优先：del msg.id 模拟旧库走内容指纹路径
+    """
     notifications = []
     msg_pool, msg_pool_ts = {}, {}
     _dispatch("listen.add", {"nickname": "客户群"}, fakewx,
               notify=lambda m, p: notifications.append((m, p)),
               msg_pool=msg_pool, msg_pool_ts=msg_pool_ts)
     msg = FakeMsg(content="重复消息")
-    msg.id = "n1"
+    del msg.id  # 旧库无 id：走内容指纹去重
     chat = FakeChat("客户群", chat_type="group")
     fakewx.listen_reg["客户群"](msg, chat)
     fakewx.listen_reg["客户群"](msg, chat)  # 5s 内重复回调
@@ -722,6 +730,7 @@ def test_dedup_window_expiry_lets_same_fingerprint_pass(fakewx):
               notify=lambda m, p: notifications.append((m, p)),
               msg_pool=msg_pool, msg_pool_ts=msg_pool_ts)
     msg = FakeMsg(content="过期后放行")
+    del msg.id  # 旧库无 id：走内容指纹去重
     chat = FakeChat("客户群", chat_type="group")
     fakewx.listen_reg["客户群"](msg, chat)
     assert len(notifications) == 1
@@ -742,6 +751,7 @@ def test_dedup_different_fingerprint_independent(fakewx):
               msg_pool=msg_pool, msg_pool_ts=msg_pool_ts)
     m1 = FakeMsg(content="A")
     m2 = FakeMsg(content="B")
+    del m1.id, m2.id  # 旧库无 id：走内容指纹去重
     chat = FakeChat("客户群", chat_type="group")
     fakewx.listen_reg["客户群"](m1, chat)
     fakewx.listen_reg["客户群"](m2, chat)
@@ -756,15 +766,22 @@ def test_dedup_capacity_evicts_oldest(fakewx):
               notify=lambda m, p: notifications.append((m, p)),
               msg_pool=msg_pool, msg_pool_ts=msg_pool_ts)
     chat = FakeChat("客户群", chat_type="group")
-    # 灌满窗（容量 1024）：灌 1024 个不同指纹
+
+    # 灌满窗（容量 1024）：灌 1024 个不同指纹（旧库无 id → 指纹路径）
     for i in range(1024):
-        fakewx.listen_reg["客户群"](FakeMsg(content=f"c{i}"), chat)
+        m = FakeMsg(content=f"c{i}")
+        del m.id
+        fakewx.listen_reg["客户群"](m, chat)
     assert len(notifications) == 1024
     # 第 1025 个不同指纹照常放行（最旧被淘汰，不误吞新指纹）
-    fakewx.listen_reg["客户群"](FakeMsg(content="c_new"), chat)
+    m_new = FakeMsg(content="c_new")
+    del m_new.id
+    fakewx.listen_reg["客户群"](m_new, chat)
     assert len(notifications) == 1025
     # 最早的老指纹 c0 已被淘汰出窗 → 重新放行
-    fakewx.listen_reg["客户群"](FakeMsg(content="c0"), chat)
+    m_c0 = FakeMsg(content="c0")
+    del m_c0.id
+    fakewx.listen_reg["客户群"](m_c0, chat)
     assert len(notifications) == 1026
 
 
@@ -774,6 +791,7 @@ def test_dedup_refresh_keeps_order_expired_older_sibling_passes(fakewx):
     时序：K@t0 入窗 → A@t0+1 入窗 → K@t0+4 命中刷新（不保序则 K 仍钉在最旧侧）
     → A@t0+6.5 再达（age 5.5s 已过期）。不保序实现：清扫见 K(2.5s) 即 break,
     A 残留窗内被误吞；保序实现：A 已被清扫弹出,放行。
+    直接驱动 _seen_recently（指纹键域），不经 on_msg——与 id 优先无耦合。
     """
     import methods
     notifications = []
@@ -796,6 +814,26 @@ def test_dedup_refresh_keeps_order_expired_older_sibling_passes(fakewx):
     # A@base+6.5 再达：age 5.5s 已过期 → 必须放行（False）
     assert methods._seen_recently(methods._dedup_key(msg_a, "客户群"), now=base + 6.5) is False, \
         "刷新保序修复后,更老的 A 应被清扫放行"
+
+
+def test_dedup_id_key_same_content_different_id_both_pass(fakewx):
+    """I1 回归锁：同发送人 5s 内两条同内容真实消息（原生 id 不同）——都必须放行"""
+    notifications = []
+    msg_pool, msg_pool_ts = {}, {}
+    _dispatch("listen.add", {"nickname": "客户群"}, fakewx,
+              notify=lambda m, p: notifications.append((m, p)),
+              msg_pool=msg_pool, msg_pool_ts=msg_pool_ts)
+    chat = FakeChat("客户群", chat_type="group")
+    m1 = FakeMsg(content="收到")
+    m1.id = "native_a1"
+    m2 = FakeMsg(content="收到")  # 同发送人同内容，但 id 不同（真实第二条）
+    m2.id = "native_a2"
+    fakewx.listen_reg["客户群"](m1, chat)
+    fakewx.listen_reg["客户群"](m2, chat)
+    assert len(notifications) == 2, "id 不同即真消息,内容指纹不得误吞"
+    # 同 id 重复回调仍被吞（UIA 重复）
+    fakewx.listen_reg["客户群"](m1, chat)
+    assert len(notifications) == 2
 
 
 def test_listen_callback_passes_is_at_true(fakewx):

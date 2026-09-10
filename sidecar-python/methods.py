@@ -562,13 +562,20 @@ def _listen_add(params, wx, msg_pool, msg_pool_ts, notify, mock):
         消息归属会话（msg 对象本身无 who 属性，附录 A）。
         """
         try:
-            if _seen_recently(_dedup_key(msg, str(getattr(chat, "who", "")))):
-                return  # 窗口内重复回调：整条丢弃（不入池不通知）
+            chat_who = str(getattr(chat, "who", ""))
             # 原生 id 优先（确定性幂等键——Server 可按 msg_id 去重；
             # 同一消息重复回调命中同一池键，二次 RPC 不重复触发）。
             # 旧版 wxautox4 msg 无 id 属性 → 退回随机 uuid（不劣于现状）。
-            mid = str(getattr(msg, "id", "")).strip() or uuid.uuid4().hex[:12]
-            _pool_put(msg_pool, msg_pool_ts, mid, msg, str(getattr(chat, "who", "")))
+            native_id = str(getattr(msg, "id", "")).strip()
+            # 去重键 id 优先：UIA 重复回调携带相同原生 id——按 id 吞；
+            # 旧库无 id 才退回内容指纹（此时同内容 5s 重复是已知接受的误吞面）。
+            # 判定用 native_id 而非 mid：mid 有 uuid 兜底恒非空，
+            # 按 mid 判会让旧库永远走 id 分支，指纹兜底成死代码
+            dedup_key = f"id:{chat_who}:{native_id}" if native_id else _dedup_key(msg, chat_who)
+            if _seen_recently(dedup_key):
+                return  # 窗口内重复回调：整条丢弃（不入池不通知）
+            mid = native_id or uuid.uuid4().hex[:12]
+            _pool_put(msg_pool, msg_pool_ts, mid, msg, chat_who)
             notify("message.received", _raw_message(msg, chat, mid))
         except Exception as e:  # noqa: BLE001 — 回调内异常上抛会杀 wxautox4 监听线程
             sidecar_log.log("ERROR", f"message.received 回调异常: {e}")
